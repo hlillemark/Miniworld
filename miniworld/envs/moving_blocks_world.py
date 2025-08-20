@@ -1,47 +1,29 @@
 from gymnasium import utils
 import math
 import numpy as np
-from miniworld.math import intersect_circle_segs
 
 from miniworld.entity import Box
 from miniworld.envs.putnext import PutNext
+from miniworld.math import intersect_circle_segs
+from miniworld.miniworld import MiniWorldEnv
 
 
-class PutNextMoving(PutNext, utils.EzPickle):
+class MovingBlocksWorld(PutNext, utils.EzPickle):
     """
-    ## Description
+    Single-room environment derived from PutNext where colored boxes move
+    autonomously each step. Reward-based termination is disabled: episodes only
+    end due to time limits.
 
-    Single-room environment like PutNext where a red box must be placed next
-    to a yellow box. Additionally, each box is assigned a random 2D velocity at
-    reset time and will move by that velocity at every step (unless being
-    carried). If a move would collide with a wall or another entity, the box's
-    velocity is reversed (bounces), and the box attempts the reversed move once.
-
-    Optional behavior:
-    - If `box_allow_overlap=True`, boxes ignore collisions with other boxes
-      (they only collide with walls and the agent).
-    - If `agent_box_allow_overlap=True`, the agent and boxes ignore collisions
-      with each other (both ways). Walls still collide.
-
-    ## Action Space
-
-    Same as `PutNext`.
-
-    ## Observation Space
-
-    Same as `PutNext`.
-
-    ## Rewards
-
-    +(1 - 0.2 * (step_count / max_episode_steps)) when red box is next to yellow box
-
-    ## Arguments
-
-    * `size`: size of world
-
-    ```python
-    env = gymnasium.make("MiniWorld-PutNextMoving-v0", size=12)
-    ```
+    Options:
+    - box_speed_scale: scales continuous box speed when not in grid mode
+    - box_allow_overlap: if True, boxes ignore box-box collisions
+    - agent_box_allow_overlap: if True, agent and boxes ignore collisions
+    - box_random_orientation: if True, keep randomized box orientations on reset;
+      otherwise orientations are aligned to 0
+    - grid_mode: if True, snap agent/boxes to integer grid and use integer
+      per-axis velocities for boxes
+    - grid_vel_min / grid_vel_max: integer velocity component range for boxes in
+      grid mode (inclusive). (0,0) is avoided
     """
 
     def __init__(
@@ -65,7 +47,7 @@ class PutNextMoving(PutNext, utils.EzPickle):
         self.grid_vel_min = int(grid_vel_min)
         self.grid_vel_max = int(grid_vel_max)
         super().__init__(size=size, **kwargs)
-        # Decouple success tolerance from forward_step; default to the base max_forward_step at init
+        # Keep for compatibility; not used for reward anymore
         self.near_margin = (
             float(near_margin)
             if near_margin is not None
@@ -86,22 +68,18 @@ class PutNextMoving(PutNext, utils.EzPickle):
         )
 
     def _quantize_heading(self):
-        # Snap heading to nearest 90 degrees
         q = (math.pi / 2)
         self.agent.dir = round(self.agent.dir / q) * q
         if self.agent.carrying is not None:
             self.agent.carrying.dir = self.agent.dir
 
     def _snap_entity_to_grid(self, ent):
-        # Round X/Z to nearest integer. If collision, try small neighborhood.
         snapped = ent.pos.copy()
         snapped[0] = round(snapped[0])
         snapped[2] = round(snapped[2])
-        # If no collision at snapped location, accept
         if not self.intersect(ent, snapped, ent.radius):
             ent.pos = snapped
             return
-        # Try nearby integer cells in a small window
         for dx in [-1, 0, 1]:
             for dz in [-1, 0, 1]:
                 candidate = snapped.copy()
@@ -110,28 +88,56 @@ class PutNextMoving(PutNext, utils.EzPickle):
                 if not self.intersect(ent, candidate, ent.radius):
                     ent.pos = candidate
                     return
-        # If all fail, keep original position
+
+    def reset(self, *, seed=None, options=None):
+        obs, info = super().reset(seed=seed, options=options)
+
+        if not self.box_random_orientation:
+            for ent in self.entities:
+                if isinstance(ent, Box):
+                    ent.dir = 0.0
+
+        if self.grid_mode:
+            self._snap_entity_to_grid(self.agent)
+            for ent in self.entities:
+                if isinstance(ent, Box):
+                    self._snap_entity_to_grid(ent)
+
+        # Assign velocities
+        rand = self.np_random if self.domain_rand else None
+        move_step = self.params.sample(rand, "forward_step") * self.box_speed_scale
+
+        for ent in self.entities:
+            if not isinstance(ent, Box):
+                continue
+            if self.grid_mode:
+                while True:
+                    vx = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
+                    vz = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
+                    if vx != 0 or vz != 0:
+                        break
+                ent.velocity = np.array([int(vx), 0.0, int(vz)], dtype=float)
+            else:
+                theta = self.np_random.uniform(-math.pi, math.pi)
+                vx = move_step * math.cos(theta)
+                vz = move_step * math.sin(theta)
+                ent.velocity = np.array([vx, 0.0, vz], dtype=float)
+
+        return obs, info
 
     def intersect(self, ent, pos, radius):
-        """
-        Intersect that optionally ignores box-box or agent-box collisions based on flags.
-        Returns True for wall collisions, the colliding entity for entity collisions, or None.
-        """
-
-        # Ignore the Y position
+        # Ignore Y
         px, _, pz = pos
         pos = np.array([px, 0, pz])
 
-        # Check for intersection with walls
+        # Walls
         if intersect_circle_segs(pos, radius, self.wall_segs):
             return True
 
-        # Check for entity intersection
+        # Entities
         for ent2 in self.entities:
             if ent2 is ent:
                 continue
-
-            # Apply overlap options
             if self.box_allow_overlap and isinstance(ent, Box) and isinstance(ent2, Box):
                 continue
             if self.agent_box_allow_overlap and (
@@ -148,75 +154,27 @@ class PutNextMoving(PutNext, utils.EzPickle):
 
         return None
 
-    def _boxes_next_to_each_other(self):
-        d = np.linalg.norm(self.red_box.pos - self.yellow_box.pos)
-        return d < (self.red_box.radius + self.yellow_box.radius + self.near_margin)
-
-    def reset(self, *, seed=None, options=None):
-        obs, info = super().reset(seed=seed, options=options)
-
-        # Apply box orientation policy (default aligned, otherwise randomized already by spawning)
-        if not self.box_random_orientation:
-            for ent in self.entities:
-                if isinstance(ent, Box):
-                    ent.dir = 0.0
-
-        # If grid mode, snap initial positions
-        if self.grid_mode:
-            # Snap agent and boxes
-            self._snap_entity_to_grid(self.agent)
-            for ent in self.entities:
-                if isinstance(ent, Box):
-                    self._snap_entity_to_grid(ent)
-
-        # Assign a random velocity to each box at episode start
-        rand = self.np_random if self.domain_rand else None
-        move_step = self.params.sample(rand, "forward_step") * self.box_speed_scale
-
-        for ent in self.entities:
-            if not isinstance(ent, Box):
-                continue
-            if self.grid_mode:
-                # Integer velocity per component within [min, max], avoid (0,0)
-                while True:
-                    vx = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
-                    vz = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
-                    if vx != 0 or vz != 0:
-                        break
-                ent.velocity = np.array([int(vx), 0.0, int(vz)], dtype=float)
-            else:
-                theta = self.np_random.uniform(-math.pi, math.pi)
-                vx = move_step * math.cos(theta)
-                vz = move_step * math.sin(theta)
-                ent.velocity = np.array([vx, 0.0, vz], dtype=float)
-
-        return obs, info
-
     def step(self, action):
-        # In grid mode, disable agent lateral drift for the action step
+        # Avoid PutNext's reward-based termination by calling MiniWorldEnv.step
         if self.grid_mode:
             original_params = self.params
             params_copy = self.params.copy()
             params_copy.set("forward_drift", 0.0, 0.0, 0.0)
             self.params = params_copy
-            obs, reward, termination, truncation, info = super().step(action)
+            obs, reward, termination, truncation, info = MiniWorldEnv.step(self, action)
             self.params = original_params
         else:
-            obs, reward, termination, truncation, info = super().step(action)
+            obs, reward, termination, truncation, info = MiniWorldEnv.step(self, action)
 
-        # If episode already ended in the base step, don't move boxes
         if termination or truncation:
             return obs, reward, termination, truncation, info
 
-        # Snap agent to grid and quantize heading if needed
         if self.grid_mode:
             self._snap_entity_to_grid(self.agent)
             self._quantize_heading()
-            # If carrying, keep carried object snapped too
             if self.agent.carrying is not None:
                 self._snap_entity_to_grid(self.agent.carrying)
 
-        # After applying the agent action, move each box along its own velocity
         carrying = self.agent.carrying
 
         for ent in list(self.entities):
@@ -225,7 +183,6 @@ class PutNextMoving(PutNext, utils.EzPickle):
             if carrying is not None and ent is carrying:
                 continue
 
-            # Ensure velocity exists (in case of custom resets)
             if not hasattr(ent, "velocity"):
                 theta = self.np_random.uniform(-math.pi, math.pi)
                 rand = self.np_random if self.domain_rand else None
@@ -235,10 +192,9 @@ class PutNextMoving(PutNext, utils.EzPickle):
                     dtype=float,
                 )
 
-            # Axis-separated movement with per-axis bounce
             current_pos = ent.pos
-            
-            # Move along X axis first
+
+            # X axis
             if ent.velocity[0] != 0.0:
                 candidate = current_pos.copy()
                 candidate[0] += ent.velocity[0]
@@ -246,7 +202,6 @@ class PutNextMoving(PutNext, utils.EzPickle):
                 if (not hit) or (self.box_allow_overlap and isinstance(hit, Box)):
                     current_pos = candidate
                 else:
-                    # Reverse X velocity and attempt bounce move along X
                     ent.velocity[0] = -ent.velocity[0]
                     candidate_bounce = current_pos.copy()
                     candidate_bounce[0] += ent.velocity[0]
@@ -258,7 +213,7 @@ class PutNextMoving(PutNext, utils.EzPickle):
             if self.grid_mode:
                 current_pos[0] = round(current_pos[0])
 
-            # Then move along Z axis
+            # Z axis
             if ent.velocity[2] != 0.0:
                 candidate = current_pos.copy()
                 candidate[2] += ent.velocity[2]
@@ -266,7 +221,6 @@ class PutNextMoving(PutNext, utils.EzPickle):
                 if (not hit) or (self.box_allow_overlap and isinstance(hit, Box)):
                     current_pos = candidate
                 else:
-                    # Reverse Z velocity and attempt bounce move along Z
                     ent.velocity[2] = -ent.velocity[2]
                     candidate_bounce = current_pos.copy()
                     candidate_bounce[2] += ent.velocity[2]
@@ -280,11 +234,7 @@ class PutNextMoving(PutNext, utils.EzPickle):
 
             ent.pos = current_pos
 
-        # Re-evaluate success condition after boxes moved (using fixed near margin)
-        if not self.agent.carrying and self._boxes_next_to_each_other():
-            reward += self._reward()
-            termination = True
-
+        # No reward-based termination condition here
         return obs, reward, termination, truncation, info
 
 
