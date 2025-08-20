@@ -5,8 +5,9 @@ from pyglet.window import key
 
 
 class ManualControl:
-    def __init__(self, env, no_time_limit: bool, domain_rand: bool):
+    def __init__(self, env, no_time_limit: bool, domain_rand: bool, heading_zero: bool = False):
         self.env = env.unwrapped
+        self.heading_zero = heading_zero
 
         if no_time_limit:
             self.env.max_episode_steps = math.inf
@@ -21,6 +22,11 @@ class ManualControl:
         print("============")
 
         self.env.reset()
+        if self.heading_zero:
+            # Align heading to 0 radians and sync any carried entity orientation
+            self.env.agent.dir = 0.0
+            if self.env.agent.carrying:
+                self.env.agent.carrying.dir = self.env.agent.dir
 
         # Create the display window
         self.env.render()
@@ -37,6 +43,10 @@ class ManualControl:
             if symbol == key.BACKSPACE or symbol == key.SLASH:
                 print("RESET")
                 self.env.reset()
+                if self.heading_zero:
+                    self.env.agent.dir = 0.0
+                    if self.env.agent.carrying:
+                        self.env.agent.carrying.dir = self.env.agent.dir
                 self.env.render()
                 return
 
@@ -88,5 +98,9 @@ class ManualControl:
         if termination or truncation:
             print("done!")
             self.env.reset()
+            if self.heading_zero:
+                self.env.agent.dir = 0.0
+                if self.env.agent.carrying:
+                    self.env.agent.carrying.dir = self.env.agent.dir
 
         self.env.render()
