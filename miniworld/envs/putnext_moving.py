@@ -44,11 +44,26 @@ class PutNextMoving(PutNext, utils.EzPickle):
     ```
     """
 
-    def __init__(self, size=12, box_speed_scale=1.0, box_allow_overlap=False, agent_box_allow_overlap=False, box_random_orientation=False, near_margin=None, **kwargs):
+    def __init__(
+        self,
+        size=12,
+        box_speed_scale=1.0,
+        box_allow_overlap=False,
+        agent_box_allow_overlap=False,
+        box_random_orientation=False,
+        grid_mode=False,
+        grid_vel_min=-1,
+        grid_vel_max=1,
+        near_margin=None,
+        **kwargs,
+    ):
         self.box_speed_scale = float(box_speed_scale)
         self.box_allow_overlap = bool(box_allow_overlap)
         self.agent_box_allow_overlap = bool(agent_box_allow_overlap)
         self.box_random_orientation = bool(box_random_orientation)
+        self.grid_mode = bool(grid_mode)
+        self.grid_vel_min = int(grid_vel_min)
+        self.grid_vel_max = int(grid_vel_max)
         super().__init__(size=size, **kwargs)
         # Decouple success tolerance from forward_step; default to the base max_forward_step at init
         self.near_margin = (
@@ -56,7 +71,46 @@ class PutNextMoving(PutNext, utils.EzPickle):
             if near_margin is not None
             else 1.1 * float(self.max_forward_step)
         )
-        utils.EzPickle.__init__(self, size, box_speed_scale, box_allow_overlap, agent_box_allow_overlap, box_random_orientation, self.near_margin, **kwargs)
+        utils.EzPickle.__init__(
+            self,
+            size,
+            box_speed_scale,
+            box_allow_overlap,
+            agent_box_allow_overlap,
+            box_random_orientation,
+            self.grid_mode,
+            self.grid_vel_min,
+            self.grid_vel_max,
+            self.near_margin,
+            **kwargs,
+        )
+
+    def _quantize_heading(self):
+        # Snap heading to nearest 90 degrees
+        q = (math.pi / 2)
+        self.agent.dir = round(self.agent.dir / q) * q
+        if self.agent.carrying is not None:
+            self.agent.carrying.dir = self.agent.dir
+
+    def _snap_entity_to_grid(self, ent):
+        # Round X/Z to nearest integer. If collision, try small neighborhood.
+        snapped = ent.pos.copy()
+        snapped[0] = round(snapped[0])
+        snapped[2] = round(snapped[2])
+        # If no collision at snapped location, accept
+        if not self.intersect(ent, snapped, ent.radius):
+            ent.pos = snapped
+            return
+        # Try nearby integer cells in a small window
+        for dx in [-1, 0, 1]:
+            for dz in [-1, 0, 1]:
+                candidate = snapped.copy()
+                candidate[0] += dx
+                candidate[2] += dz
+                if not self.intersect(ent, candidate, ent.radius):
+                    ent.pos = candidate
+                    return
+        # If all fail, keep original position
 
     def intersect(self, ent, pos, radius):
         """
@@ -107,6 +161,14 @@ class PutNextMoving(PutNext, utils.EzPickle):
                 if isinstance(ent, Box):
                     ent.dir = 0.0
 
+        # If grid mode, snap initial positions
+        if self.grid_mode:
+            # Snap agent and boxes
+            self._snap_entity_to_grid(self.agent)
+            for ent in self.entities:
+                if isinstance(ent, Box):
+                    self._snap_entity_to_grid(ent)
+
         # Assign a random velocity to each box at episode start
         rand = self.np_random if self.domain_rand else None
         move_step = self.params.sample(rand, "forward_step") * self.box_speed_scale
@@ -114,19 +176,45 @@ class PutNextMoving(PutNext, utils.EzPickle):
         for ent in self.entities:
             if not isinstance(ent, Box):
                 continue
-            theta = self.np_random.uniform(-math.pi, math.pi)
-            vx = move_step * math.cos(theta)
-            vz = move_step * math.sin(theta)
-            ent.velocity = np.array([vx, 0.0, vz], dtype=float)
+            if self.grid_mode:
+                # Integer velocity per component within [min, max], avoid (0,0)
+                while True:
+                    vx = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
+                    vz = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
+                    if vx != 0 or vz != 0:
+                        break
+                ent.velocity = np.array([int(vx), 0.0, int(vz)], dtype=float)
+            else:
+                theta = self.np_random.uniform(-math.pi, math.pi)
+                vx = move_step * math.cos(theta)
+                vz = move_step * math.sin(theta)
+                ent.velocity = np.array([vx, 0.0, vz], dtype=float)
 
         return obs, info
 
     def step(self, action):
-        obs, reward, termination, truncation, info = super().step(action)
+        # In grid mode, disable agent lateral drift for the action step
+        if self.grid_mode:
+            original_params = self.params
+            params_copy = self.params.copy()
+            params_copy.set("forward_drift", 0.0, 0.0, 0.0)
+            self.params = params_copy
+            obs, reward, termination, truncation, info = super().step(action)
+            self.params = original_params
+        else:
+            obs, reward, termination, truncation, info = super().step(action)
 
         # If episode already ended in the base step, don't move boxes
         if termination or truncation:
             return obs, reward, termination, truncation, info
+
+        # Snap agent to grid and quantize heading if needed
+        if self.grid_mode:
+            self._snap_entity_to_grid(self.agent)
+            self._quantize_heading()
+            # If carrying, keep carried object snapped too
+            if self.agent.carrying is not None:
+                self._snap_entity_to_grid(self.agent.carrying)
 
         # After applying the agent action, move each box along its own velocity
         carrying = self.agent.carrying
@@ -149,7 +237,7 @@ class PutNextMoving(PutNext, utils.EzPickle):
 
             # Axis-separated movement with per-axis bounce
             current_pos = ent.pos
-
+            
             # Move along X axis first
             if ent.velocity[0] != 0.0:
                 candidate = current_pos.copy()
@@ -167,6 +255,8 @@ class PutNextMoving(PutNext, utils.EzPickle):
                         self.box_allow_overlap and isinstance(hit_bounce, Box)
                     ):
                         current_pos = candidate_bounce
+            if self.grid_mode:
+                current_pos[0] = round(current_pos[0])
 
             # Then move along Z axis
             if ent.velocity[2] != 0.0:
@@ -185,6 +275,8 @@ class PutNextMoving(PutNext, utils.EzPickle):
                         self.box_allow_overlap and isinstance(hit_bounce, Box)
                     ):
                         current_pos = candidate_bounce
+            if self.grid_mode:
+                current_pos[2] = round(current_pos[2])
 
             ent.pos = current_pos
 

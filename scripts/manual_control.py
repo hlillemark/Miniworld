@@ -50,6 +50,23 @@ def main():
         help="randomize initial box orientations (otherwise align to 0)",
     )
     parser.add_argument(
+        "--grid-mode",
+        action="store_true",
+        help="snap positions to integer grid and use integer velocities for boxes",
+    )
+    parser.add_argument(
+        "--grid-vel-min",
+        type=int,
+        default=-1,
+        help="min integer velocity component for boxes in grid mode (inclusive)",
+    )
+    parser.add_argument(
+        "--grid-vel-max",
+        type=int,
+        default=1,
+        help="max integer velocity component for boxes in grid mode (inclusive)",
+    )
+    parser.add_argument(
         "--turn-step-deg",
         type=float,
         default=None,
@@ -78,6 +95,10 @@ def main():
         env_kwargs["agent_box_allow_overlap"] = True
     if args.box_random_orientation:
         env_kwargs["box_random_orientation"] = True
+    if args.grid_mode:
+        env_kwargs["grid_mode"] = True
+        env_kwargs["grid_vel_min"] = int(args.grid_vel_min)
+        env_kwargs["grid_vel_max"] = int(args.grid_vel_max)
 
     # If step/turn parameters are provided, build a params object up-front so
     # the very first reset (inside env __init__) picks them up
@@ -115,6 +136,10 @@ def main():
                 "Warning: --box-random-orientation not supported by this env; ignoring."
             )
             env_kwargs.pop("box_random_orientation")
+        for k in ["grid_mode", "grid_vel_min", "grid_vel_max"]:
+            if k in env_kwargs:
+                print(f"Warning: --{k.replace('_','-')} not supported by this env; ignoring.")
+                env_kwargs.pop(k)
         env = gym.make(args.env_name, **env_kwargs)
     miniworld_version = miniworld.__version__
 
