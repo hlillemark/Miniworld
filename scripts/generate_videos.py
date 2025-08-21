@@ -318,6 +318,7 @@ def run_rollout(
     np.ndarray,  # agent_pos (T+1,3)
     np.ndarray,  # delta_xz (T,2)
     np.ndarray,  # delta_dir (T,)
+    np.ndarray,  # agent_dir (T,)
 ]:
     obs_list = []
     depth_list = []
@@ -388,7 +389,10 @@ def run_rollout(
     # Trim absolute positions to match kept frames
     agent_pos = agent_pos_full[:steps_executed]  # (T,3)
 
-    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir
+    # Absolute heading per kept frame (length T)
+    agent_dir = agent_dir_full[:steps_executed]
+
+    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir, agent_dir
 
 
 def write_mp4_rgb(out_path: str, frames: np.ndarray, fps: int = 15):
@@ -474,7 +478,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         lookahead_mult=args.lookahead_mult,
     )
 
-    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
@@ -622,6 +626,7 @@ def main():
             "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
             "delta_xz": torch.tensor(delta_xz, dtype=torch.float32),
             "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
+            "agent_dir": torch.tensor(agent_dir, dtype=torch.float32),
         },
         f"{args.out_prefix}_actions.pt",
     )
