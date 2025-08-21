@@ -20,6 +20,7 @@ Outputs:
   
   
 command 7pm aug 20
+single generation:
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlocksWorld-v0 \
   --policy biased_random --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
@@ -28,16 +29,16 @@ python -m scripts.generate_videos \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
   --steps 300 --out-prefix ./out/run_move --debug --room-size 16
   
-  
+multi generation: 
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlocksWorld-v0 \
-  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls \
+  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
-  --render-width 64 --render-height 64 --obs-width 64 --obs-height 64 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
   --steps 500 --room-size 16 \
-  --dataset-root ./blockworld_dataset --num-videos 1000 --block-size 100 --num-processes 8
-  
+  --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
+
 """
 
 import argparse
@@ -238,6 +239,10 @@ class BiasedRandomPolicy:
         return a.turn_left if self.rng.random() < probs[0] else a.turn_right
 
 
+def _wrap_angle(a: np.ndarray) -> np.ndarray:
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
 def run_rollout(
     env: gym.Env,
     steps: int,
@@ -246,11 +251,21 @@ def run_rollout(
     policy_name: str,
     policy_kwargs: dict,
     capture_top: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[
+    np.ndarray,  # rgb
+    np.ndarray,  # depth
+    np.ndarray,  # actions
+    np.ndarray,  # top or None
+    np.ndarray,  # agent_pos (T+1,3)
+    np.ndarray,  # delta_xz (T,2)
+    np.ndarray,  # delta_dir (T,)
+]:
     obs_list = []
     depth_list = []
     top_list = [] if capture_top else None
     actions = []
+    agent_pos_list = []
+    agent_dir_list = []
 
     obs, _ = env.reset()
     if align_heading_zero:
@@ -261,6 +276,9 @@ def run_rollout(
     obs_list.append(rgb)
     depth = env.unwrapped.render_depth(env.unwrapped.vis_fb)
     depth_list.append(depth)
+    # Initial agent state
+    agent_pos_list.append(env.unwrapped.agent.pos.copy())
+    agent_dir_list.append(float(env.unwrapped.agent.dir))
     if capture_top:
         top = env.unwrapped.render_top_view(env.unwrapped.vis_fb, render_agent=True)
         top_list.append(top)
@@ -282,6 +300,9 @@ def run_rollout(
             top = env.unwrapped.render_top_view(env.unwrapped.vis_fb, render_agent=True)
             top_list.append(top)
         actions.append(a)
+        # Record agent state after step
+        agent_pos_list.append(env.unwrapped.agent.pos.copy())
+        agent_dir_list.append(float(env.unwrapped.agent.dir))
 
         if term or trunc:
             break
@@ -291,7 +312,15 @@ def run_rollout(
     depth_arr = np.stack(depth_list, axis=0)  # T,H,W,1 float32
     actions_arr = np.array(actions, dtype=np.int64)
     top_arr = np.stack(top_list, axis=0) if capture_top else None
-    return rgb_arr, depth_arr, actions_arr, top_arr
+
+    # Agent trajectories
+    agent_pos = np.stack(agent_pos_list, axis=0)  # (T+1, 3)
+    agent_dir = np.array(agent_dir_list, dtype=np.float32)  # (T+1,)
+    # Deltas per action step
+    delta_xz = agent_pos[1:, (0, 2)] - agent_pos[:-1, (0, 2)]  # (T, 2)
+    delta_dir = _wrap_angle(agent_dir[1:] - agent_dir[:-1])  # (T,)
+
+    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir
 
 
 def write_mp4_rgb(out_path: str, frames: np.ndarray, fps: int = 15):
@@ -377,7 +406,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         lookahead_mult=args.lookahead_mult,
     )
 
-    rgb, depth, actions, top = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
@@ -389,7 +418,15 @@ def _generate_one(idx: int, ns: SimpleNamespace):
 
     write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
     write_mp4_depth(f"{out_prefix}_depth.mp4", depth)
-    torch.save(torch.tensor(actions, dtype=torch.long), f"{out_prefix}_actions.pt")
+    torch.save(
+        {
+            "actions": torch.tensor(actions, dtype=torch.long),
+            "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
+            "delta_xz": torch.tensor(delta_xz, dtype=torch.float32),
+            "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
+        },
+        f"{out_prefix}_actions.pt",
+    )
     if args.debug and top is not None:
         H, W = rgb.shape[1], rgb.shape[2]
         if top.shape[1] != H or top.shape[2] != W:
@@ -430,7 +467,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-name", required=True)
     parser.add_argument("--steps", type=int, default=300)
-    parser.add_argument("--out-prefix", type=str, required=True)
+    parser.add_argument("--out-prefix", type=str, required=False)
     # Render (RGB) resolution
     parser.add_argument("--render-width", type=int, default=128)
     parser.add_argument("--render-height", type=int, default=128)
@@ -497,7 +534,7 @@ def main():
         lookahead_mult=args.lookahead_mult,
     )
 
-    rgb, depth, actions, top = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
@@ -510,7 +547,15 @@ def main():
     # Save outputs
     write_mp4_rgb(f"{args.out_prefix}_rgb.mp4", rgb)
     write_mp4_depth(f"{args.out_prefix}_depth.mp4", depth)
-    torch.save(torch.tensor(actions, dtype=torch.long), f"{args.out_prefix}_actions.pt")
+    torch.save(
+        {
+            "actions": torch.tensor(actions, dtype=torch.long),
+            "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
+            "delta_xz": torch.tensor(delta_xz, dtype=torch.float32),
+            "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
+        },
+        f"{args.out_prefix}_actions.pt",
+    )
 
     if args.debug and top is not None:
         # Concatenate RGB (left) and Top (right)

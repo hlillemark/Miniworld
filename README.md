@@ -82,6 +82,35 @@ python3 -m pip install -e .
 
 If you run into any problems, please take a look at the [troubleshooting guide](docs/content/troubleshooting.md).
 
+## Usage for dynamic blockworld dataset generation
+
+```console
+python3 -m pip install -e .[dataset]
+```
+
+To generate one example video of blockworld, you can use the following command
+```console 
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --policy biased_random --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 300 --out-prefix ./out/run_move --debug --room-size 16
+```
+
+To run parallel dataset generation, set the settings from this command:
+```console 
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --room-size 16 \
+  --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
+```
+
 ## Usage
 
 There is a simple UI application which allows you to control the simulation or real robot manually.
