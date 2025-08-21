@@ -28,7 +28,7 @@ MiniWorld can be seen as a simpler alternative to VizDoom or DMLab. It is writte
     <img src="images/collecthealth_0.jpg" width=260 alt="Figure of Collect Health environment">
 </p>
 
-Features:
+<!-- Features:
 - Few dependencies, less likely to break, easy to install
 - Easy to create your own levels, or modify existing ones
 - Good performance, high frame rate, support for multiple processes
@@ -55,7 +55,7 @@ List of publications & submissions using MiniWorld (please open a pull request t
 - [Avoidance Learning Using Observational Reinforcement Learning](https://arxiv.org/abs/1909.11228) (Mila, McGill, Sept 2019)
 - [Visual Hindsight Experience Replay](https://arxiv.org/pdf/1901.11529.pdf) (Georgia Tech, UC Berkeley, Jan 2019)
 
-This simulator was created as part of work done at [Mila](https://mila.quebec/).
+This simulator was created as part of work done at [Mila](https://mila.quebec/). -->
 
 ## Installation
 
