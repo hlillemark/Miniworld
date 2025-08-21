@@ -36,14 +36,12 @@ python -m scripts.generate_videos \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 16 --no-time-limit \
-  --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
+  --steps 500 --room-size 16 --no-time-limit --even-lighting \
+  --dataset-root ./out/futureproof_evenlighting --num-videos 20000 --block-size 256 --num-processes 64
   
 # IMPORTANT NOTE FOR HEADLESS MODE RENDERING ON SERVERS: 
 run like: 
 MINIWORLD_HEADLESS=1 python -m scripts.generate_videos ... 
-
-MINIWORLD_HEADLESS=1 python -m scripts.generate_videos   --env-name MiniWorld-MovingBlocksWorld-v0   --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap   --turn-step-deg 90 --forward-step 1.0 --heading-zero   --grid-mode --grid-vel-min -1 --grid-vel-max 1   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128   --steps 500 --room-size 16   --dataset-root ./out/blockworld_dataset --num-videos 60000 --block-size 1024 --num-processes 64
 
 # NOTE: extra vae training samples generated like this: 
 python -m scripts.generate_videos \
