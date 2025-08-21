@@ -25,8 +25,18 @@ python -m scripts.generate_videos \
   --policy biased_random --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
-  --render-width 256 --render-height 256 --obs-width 128 --obs-height 128 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
   --steps 300 --out-prefix ./out/run_move --debug --room-size 16
+  
+  
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
+  --render-width 64 --render-height 64 --obs-width 64 --obs-height 64 \
+  --steps 500 --room-size 16 \
+  --dataset-root ./blockworld_dataset --num-videos 1000 --block-size 100 --num-processes 8
   
 """
 
@@ -38,6 +48,9 @@ from typing import Tuple
 import gymnasium as gym
 import numpy as np
 import torch
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from types import SimpleNamespace
+from pathlib import Path
 
 import miniworld
 from miniworld.params import DEFAULT_PARAMS
@@ -323,6 +336,96 @@ def write_mp4_depth(out_path: str, depth_frames: np.ndarray, fps: int = 15):
             writer.append_data(frame)
 
 
+def _generate_one(idx: int, ns: SimpleNamespace):
+    # Construct per-item args namespace for env
+    args = ns.args
+    # Derive block directory and filenames
+    block_id = idx // ns.block_size
+    item_id = idx % ns.block_size
+    block_dir = Path(ns.dataset_root) / f"{block_id}"
+    block_dir.mkdir(parents=True, exist_ok=True)
+    stem = str(item_id).zfill(ns.file_digits)
+    out_prefix = str(block_dir / stem)
+
+    # Seed per item for reproducibility
+    # Choose a per-item seed
+    if args.seed is None:
+        # High-entropy seed using OS randomness
+        import secrets
+
+        item_seed = secrets.randbits(64)
+    else:
+        item_seed = int(args.seed) + idx
+
+    # Build env with same knobs
+    env_args = SimpleNamespace(**vars(args))
+    env_args.out_prefix = out_prefix
+    env_args.no_time_limit = True  # in dataset mode, default to ignore time limit
+
+    # Make sure domain randomization can vary per item while still reproducible
+    env = build_env(env_args)
+
+    # Apply seed via gym API
+    env.reset(seed=item_seed)
+
+    policy_kwargs = dict(
+        forward_prob=args.forward_prob,
+        turn_left_weight=args.turn_left_weight,
+        turn_right_weight=args.turn_right_weight,
+        wall_buffer=args.wall_buffer,
+        avoid_turning_into_walls=args.avoid_turning_into_walls,
+        lookahead_mult=args.lookahead_mult,
+    )
+
+    rgb, depth, actions, top = run_rollout(
+        env,
+        args.steps,
+        align_heading_zero=args.heading_zero,
+        segment_len=args.segment_len,
+        policy_name=args.policy,
+        policy_kwargs=policy_kwargs,
+        capture_top=args.debug,
+    )
+
+    write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
+    write_mp4_depth(f"{out_prefix}_depth.mp4", depth)
+    torch.save(torch.tensor(actions, dtype=torch.long), f"{out_prefix}_actions.pt")
+    if args.debug and top is not None:
+        H, W = rgb.shape[1], rgb.shape[2]
+        if top.shape[1] != H or top.shape[2] != W:
+            import cv2
+
+            resized = [cv2.resize(f, (W, H), interpolation=cv2.INTER_NEAREST) for f in top]
+            top = np.stack(resized, axis=0)
+        side_by_side = np.concatenate([rgb, top], axis=2)
+        write_mp4_rgb(f"{out_prefix}_debug.mp4", side_by_side)
+
+    env.close()
+    return idx
+
+
+def run_parallel_dataset(args):
+    from tqdm import tqdm
+
+    assert args.dataset_root and args.num_videos > 0, "Provide --dataset-root and --num-videos"
+    ds_root = Path(args.dataset_root)
+    ds_root.mkdir(parents=True, exist_ok=True)
+
+    ns = SimpleNamespace(
+        args=args,
+        dataset_root=str(ds_root),
+        block_size=int(args.block_size),
+        file_digits=int(args.file_digits),
+    )
+
+    indices = list(range(int(args.num_videos)))
+
+    with ProcessPoolExecutor(max_workers=int(args.num_processes)) as ex:
+        futures = {ex.submit(_generate_one, idx, ns): idx for idx in indices}
+        for _ in tqdm(as_completed(futures), total=len(futures), desc="Generating videos"):
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-name", required=True)
@@ -353,6 +456,19 @@ def main():
     parser.add_argument("--debug", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--room-size", type=int, default=None, help="square room side length in meters (e.g., 12)")
 
+    # Parallel dataset generation
+    parser.add_argument("--dataset-root", type=str, default=None, help="if set, run in parallel dataset generation mode and write outputs under this root")
+    parser.add_argument("--num-videos", type=int, default=0, help="total number of videos to generate (parallel mode)")
+    parser.add_argument("--block-size", type=int, default=100, help="number of videos per block subdirectory (parallel mode)")
+    parser.add_argument("--num-processes", type=int, default=4, help="number of worker processes (parallel mode)")
+    parser.add_argument("--file-digits", type=int, default=4, help="zero-padding width for filenames inside each block (parallel mode)")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="base seed for deterministic generation across items; if omitted, each item uses a random seed",
+    )
+
     # Policy selection and knobs
     parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "back_and_forth"], help="which control policy to use")
     parser.add_argument("--forward-prob", type=float, default=0.8, help="biased_random: probability of moving forward when safe")
@@ -363,6 +479,11 @@ def main():
     parser.add_argument("--lookahead-mult", type=float, default=2.0, help="biased_random: lookahead distance multiplier relative to max forward step")
 
     args = parser.parse_args()
+
+    # If dataset_root is provided, run parallel generation
+    if args.dataset_root:
+        run_parallel_dataset(args)
+        return
 
     env = build_env(args)
     print(f"Miniworld v{miniworld.__version__}, Env: {args.env_name}")

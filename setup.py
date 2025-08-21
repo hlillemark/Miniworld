@@ -61,7 +61,22 @@ setup(
         "pyglet>=1.5.27,<2.0",
         "gymnasium>=0.29.1",
     ],
-    extras_require={"testing": ["pytest>=7.0.1", "torch"]},
+    extras_require={
+        "testing": ["pytest>=7.0.1", "torch"],
+        # Extras needed for dataset/video generation utilities
+        "dataset": [
+            "imageio>=2.26",
+            "imageio-ffmpeg>=0.4.9",
+            "tqdm>=4.66",
+            "opencv-python-headless>=4.8",
+            "torch",  # for saving actions as .pt files
+        ],
+    },
+    # Install helper scripts to PATH
+    scripts=[
+        "scripts/manual_control.py",
+        "scripts/generate_videos.py",
+    ],
     # Include textures and meshes in the package
     include_package_data=True,
     classifiers=[
