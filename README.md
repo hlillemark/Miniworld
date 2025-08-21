@@ -109,6 +109,15 @@ python -m scripts.generate_videos \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
   --steps 500 --room-size 16 \
   --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
+
+xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --room-size 16 \
+  --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
 ```
 
 ## Usage

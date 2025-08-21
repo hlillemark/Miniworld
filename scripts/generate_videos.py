@@ -38,6 +38,22 @@ python -m scripts.generate_videos \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
   --steps 500 --room-size 16 \
   --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
+  
+# IMPORTANT NOTE FOR HEADLESS MODE RENDERING ON SERVERS: 
+run like: 
+MINIWORLD_HEADLESS=1 python -m scripts.generate_videos ... 
+
+MINIWORLD_HEADLESS=1 python -m scripts.generate_videos   --env-name MiniWorld-MovingBlocksWorld-v0   --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap   --turn-step-deg 90 --forward-step 1.0 --heading-zero   --grid-mode --grid-vel-min -1 --grid-vel-max 1   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128   --steps 500 --room-size 16   --dataset-root ./out/blockworld_dataset --num-videos 60000 --block-size 1024 --num-processes 64
+
+# NOTE: extra vae training samples generated like this: 
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --policy biased_random --forward-prob 0.9 --wall-buffer 0 --avoid-turning-into-walls --agent-box-allow-overlap \
+  --turn-step-deg 45 --forward-step 0.5 \
+  --grid-vel-min -1 --grid-vel-max 1 --box-random-orientation \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --room-size 12 \
+  --dataset-root ./out/blockworld_futureproof --num-videos 20000 --block-size 256 --num-processes 64
 
 """
 
@@ -52,6 +68,41 @@ import torch
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from types import SimpleNamespace
 from pathlib import Path
+
+
+def _is_truthy(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _should_enable_headless() -> bool:
+    # Explicit opt-in via env var takes precedence
+    if _is_truthy(os.environ.get("MINIWORLD_HEADLESS", "")):
+        return True
+    # Respect existing pyglet hint if already set by caller
+    if _is_truthy(os.environ.get("PYGLET_HEADLESS", "")):
+        return True
+    # Fall back to auto-detect: no X/Wayland display implies headless
+    if (os.name != "nt") and (not os.environ.get("DISPLAY")) and (not os.environ.get("WAYLAND_DISPLAY")):
+        return True
+    return False
+
+_HEADLESS_MODE = _should_enable_headless()
+
+if _HEADLESS_MODE:
+    os.environ.setdefault("PYGLET_HEADLESS", "1")
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    os.environ.setdefault("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe")
+    os.environ.setdefault("MESA_GL_VERSION_OVERRIDE", "3.3")
+    os.environ.setdefault("MESA_GLSL_VERSION_OVERRIDE", "330")
+
+import multiprocessing as mp
+if mp.get_start_method(allow_none=True) != "spawn":
+    mp.set_start_method("spawn", force=True)
+
+# optional: avoid hidden X/GLX “shadow window” (only when headless)
+import pyglet
+if _HEADLESS_MODE:
+    pyglet.options['shadow_window'] = False
 
 import miniworld
 from miniworld.params import DEFAULT_PARAMS
