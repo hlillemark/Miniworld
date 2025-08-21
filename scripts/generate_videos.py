@@ -10,7 +10,7 @@ python -m scripts.generate_videos \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
   --box-allow-overlap --agent-box-allow-overlap \
-  --box-random-orientation \
+  --box-random-orientation --no-time-limit \
   --steps 300 --out-prefix ./out/run1
 
 Outputs:
@@ -25,7 +25,7 @@ python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlocksWorld-v0 \
   --policy biased_random --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
   --steps 300 --out-prefix ./out/run_move --debug --room-size 16
   
@@ -36,7 +36,7 @@ python -m scripts.generate_videos \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 16 \
+  --steps 500 --room-size 16 --no-time-limit \
   --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
   
 # IMPORTANT NOTE FOR HEADLESS MODE RENDERING ON SERVERS: 
@@ -52,8 +52,10 @@ python -m scripts.generate_videos \
   --turn-step-deg 45 --forward-step 0.5 \
   --grid-vel-min -1 --grid-vel-max 1 --box-random-orientation \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 12 \
+  --steps 500 --room-size 12 --no-time-limit \
   --dataset-root ./out/blockworld_futureproof --num-videos 20000 --block-size 256 --num-processes 64
+
+import torch, torchvision.io as io; vid_depth = io.read_video("/Users/hansen/Desktop/ucsd/Miniworld/out/run_move_rgb.mp4", pts_unit="sec")[0].permute(0,3,1,2).to(torch.float32).div_(255)
 
 """
 
@@ -140,6 +142,7 @@ def build_env(args) -> gym.Env:
         env_kwargs["grid_vel_max"] = int(args.grid_vel_max)
 
     # Build params so first reset uses them
+    params = None
     if args.turn_step_deg is not None or args.forward_step is not None:
         params = DEFAULT_PARAMS.no_random()
         if args.turn_step_deg is not None:
@@ -148,6 +151,13 @@ def build_env(args) -> gym.Env:
         if args.forward_step is not None:
             v = float(args.forward_step)
             params.set("forward_step", v, v, v)
+    # Even lighting: force ambient 1, diffuse 0 regardless of domain rand
+    if getattr(args, "even_lighting", False):
+        if params is None:
+            params = DEFAULT_PARAMS.copy()
+        params.set("light_ambient", [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0])
+        params.set("light_color", [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    if params is not None:
         env_kwargs["params"] = params
 
     try:
@@ -358,18 +368,27 @@ def run_rollout(
         if term or trunc:
             break
 
-    # Stack to arrays
-    rgb_arr = np.stack(obs_list, axis=0)  # T,H,W,3 uint8
-    depth_arr = np.stack(depth_list, axis=0)  # T,H,W,1 float32
-    actions_arr = np.array(actions, dtype=np.int64)
-    top_arr = np.stack(top_list, axis=0) if capture_top else None
+    # Keep exactly one frame per executed transition (drop the extra terminal frame)
+    steps_executed = len(actions)
+    rgb_arr = np.stack(obs_list[:steps_executed], axis=0)  # (T,H,W,3)
+    depth_arr = np.stack(depth_list[:steps_executed], axis=0)  # (T,H,W,1)
+    actions_arr = np.array(actions, dtype=np.int64)  # (T,)
+    top_arr = (
+        np.stack(top_list[:steps_executed], axis=0) if (capture_top and top_list) else None
+    )
 
     # Agent trajectories
-    agent_pos = np.stack(agent_pos_list, axis=0)  # (T+1, 3)
-    agent_dir = np.array(agent_dir_list, dtype=np.float32)  # (T+1,)
-    # Deltas per action step
-    delta_xz = agent_pos[1:, (0, 2)] - agent_pos[:-1, (0, 2)]  # (T, 2)
-    delta_dir = _wrap_angle(agent_dir[1:] - agent_dir[:-1])  # (T,)
+    # Compute deltas from full trajectory (length T+1)
+    agent_pos_full = np.stack(agent_pos_list, axis=0)
+    agent_dir_full = np.array(agent_dir_list, dtype=np.float32)
+    delta_xz = agent_pos_full[1: steps_executed + 1, (0, 2)] - agent_pos_full[
+        :steps_executed, (0, 2)
+    ]  # (T,2)
+    delta_dir = _wrap_angle(
+        agent_dir_full[1: steps_executed + 1] - agent_dir_full[:steps_executed]
+    )  # (T,)
+    # Trim absolute positions to match kept frames
+    agent_pos = agent_pos_full[:steps_executed]  # (T,3)
 
     return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir
 
@@ -543,6 +562,7 @@ def main():
     parser.add_argument("--grid-vel-max", type=int, default=1)
     parser.add_argument("--debug", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--room-size", type=int, default=None, help="square room side length in meters (e.g., 12)")
+    parser.add_argument("--even-lighting", action="store_true", help="use uniform ambient lighting (no directional shading)")
 
     # Parallel dataset generation
     parser.add_argument("--dataset-root", type=str, default=None, help="if set, run in parallel dataset generation mode and write outputs under this root")
