@@ -2,7 +2,7 @@ from gymnasium import utils
 import math
 import numpy as np
 
-from miniworld.entity import Box
+from miniworld.entity import Box, COLOR_NAMES
 from miniworld.envs.putnext import PutNext
 from miniworld.math import intersect_circle_segs
 from miniworld.miniworld import MiniWorldEnv
@@ -36,6 +36,9 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         grid_mode=False,
         grid_vel_min=-1,
         grid_vel_max=1,
+        num_blocks=6,
+        allow_color_repeat=False,
+        color_pool=None,
         near_margin=None,
         **kwargs,
     ):
@@ -46,6 +49,9 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         self.grid_mode = bool(grid_mode)
         self.grid_vel_min = int(grid_vel_min)
         self.grid_vel_max = int(grid_vel_max)
+        self.num_blocks = int(num_blocks)
+        self.allow_color_repeat = bool(allow_color_repeat)
+        self.color_pool = list(color_pool) if color_pool is not None else list(COLOR_NAMES)
         super().__init__(size=size, **kwargs)
         # Keep for compatibility; not used for reward anymore
         self.near_margin = (
@@ -63,9 +69,30 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
             self.grid_mode,
             self.grid_vel_min,
             self.grid_vel_max,
+            self.num_blocks,
+            self.allow_color_repeat,
+            self.color_pool,
             self.near_margin,
             **kwargs,
         )
+
+    def _gen_world(self):
+        # Create a rectangular room
+        self.add_rect_room(min_x=0, max_x=self.size, min_z=0, max_z=self.size)
+
+        # Choose colors for the blocks
+        if not self.allow_color_repeat and self.num_blocks <= len(self.color_pool):
+            chosen_colors = list(self.np_random.choice(self.color_pool, size=self.num_blocks, replace=False))
+        else:
+            chosen_colors = list(self.np_random.choice(self.color_pool, size=self.num_blocks, replace=True))
+
+        # Place blocks with random sizes
+        for color in chosen_colors:
+            box = Box(color=color, size=self.np_random.uniform(0.6, 0.85))
+            self.place_entity(box)
+
+        # Place the agent at a random position
+        self.place_agent()
 
     def _quantize_heading(self):
         q = (math.pi / 2)
