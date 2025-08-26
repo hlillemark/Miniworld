@@ -607,7 +607,7 @@ def main():
         lookahead_mult=args.lookahead_mult,
     )
 
-    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
