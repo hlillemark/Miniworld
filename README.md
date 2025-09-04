@@ -151,6 +151,10 @@ Alternatively, if this doesn't work, you can also try running MiniWorld with `xv
 xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python3 your_script.py
 ```
 
+## Configuration Protection
+
+When changes made to configuration files are pushed directly to main branch, there will be a workflow detecting such behavior. The changes will be reverted and transferred into a PR for review.
+
 # Citation
 
 To cite this project please use:
