@@ -27,7 +27,7 @@ python -m scripts.generate_videos \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 300 --out-prefix ./out/run_move --debug --room-size 16 --blocks-static
+  --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 16 --blocks-static
 
 single static generation
 add --blocks-static
@@ -503,7 +503,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         segment_len=args.segment_len,
         policy_name=args.policy,
         policy_kwargs=policy_kwargs,
-        capture_top=args.debug,
+        capture_top=(args.debug_join or args.output_2d_map),
     )
 
     write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
@@ -517,7 +517,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         },
         f"{out_prefix}_actions.pt",
     )
-    if args.debug and top is not None:
+    if args.debug_join and top is not None:
         H, W = rgb.shape[1], rgb.shape[2]
         if top.shape[1] != H or top.shape[2] != W:
             import cv2
@@ -526,6 +526,9 @@ def _generate_one(idx: int, ns: SimpleNamespace):
             top = np.stack(resized, axis=0)
         side_by_side = np.concatenate([rgb, top], axis=2)
         write_mp4_rgb(f"{out_prefix}_debug.mp4", side_by_side)
+
+    if args.output_2d_map and top is not None:
+        write_mp4_rgb(f"{out_prefix}_map_2d.mp4", top)
 
     env.close()
     return idx
@@ -581,7 +584,8 @@ def main():
     parser.add_argument("--grid-mode", action="store_true")
     parser.add_argument("--grid-vel-min", type=int, default=-1)
     parser.add_argument("--grid-vel-max", type=int, default=1)
-    parser.add_argument("--debug", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
+    parser.add_argument("--debug-join", dest="debug_join", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
+    parser.add_argument("--output-2d-map", dest="output_2d_map", action="store_true", help="save the top-view map as a separate MP4 named *_map_2d.mp4")
     parser.add_argument("--room-size", type=int, default=None, help="square room side length in meters (e.g., 12)")
     parser.add_argument("--even-lighting", action="store_true", help="use uniform ambient lighting (no directional shading)")
     parser.add_argument("--floor-tex", type=str, default="white", help="floor texture name (see miniworld/textures), default white")
@@ -636,7 +640,7 @@ def main():
         segment_len=args.segment_len,
         policy_name=args.policy,
         policy_kwargs=policy_kwargs,
-        capture_top=args.debug,
+        capture_top=(args.debug_join or args.output_2d_map),
     )
 
     # Save outputs
@@ -653,7 +657,7 @@ def main():
         f"{args.out_prefix}_actions.pt",
     )
 
-    if args.debug and top is not None:
+    if args.debug_join and top is not None:
         # Concatenate RGB (left) and Top (right)
         # Ensure both are the same H,W
         H, W = rgb.shape[1], rgb.shape[2]
@@ -668,6 +672,9 @@ def main():
 
         side_by_side = np.concatenate([rgb, top], axis=2)
         write_mp4_rgb(f"{args.out_prefix}_debug.mp4", side_by_side)
+
+    if args.output_2d_map and top is not None:
+        write_mp4_rgb(f"{args.out_prefix}_map_2d.mp4", top)
 
     env.close()
 
