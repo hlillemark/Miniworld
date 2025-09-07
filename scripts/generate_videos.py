@@ -152,6 +152,8 @@ def build_env(args) -> gym.Env:
         env_kwargs["grid_vel_max"] = int(args.grid_vel_max)
     if getattr(args, "blocks_static", False):
         env_kwargs["blocks_static"] = True
+    if getattr(args, "spawn_wall_buffer", None) is not None:
+        env_kwargs["spawn_wall_buffer"] = float(args.spawn_wall_buffer)
 
     # Build params so first reset uses them
     params = None
@@ -188,6 +190,7 @@ def build_env(args) -> gym.Env:
             "blocks_static",
             "wall_tex",
             "ceil_tex",
+            "spawn_wall_buffer",
         ]:
             env_kwargs.pop(k, None)
         env = gym.make(args.env_name, **env_kwargs)
@@ -586,6 +589,7 @@ def main():
     parser.add_argument("--grid-vel-max", type=int, default=1)
     parser.add_argument("--debug-join", dest="debug_join", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--output-2d-map", dest="output_2d_map", action="store_true", help="save the top-view map as a separate MP4 named *_map_2d.mp4")
+    parser.add_argument("--spawn-wall-buffer", type=float, default=1.0, help="extra buffer from walls when spawning agent and boxes (meters)")
     parser.add_argument("--room-size", type=int, default=None, help="square room side length in meters (e.g., 12)")
     parser.add_argument("--even-lighting", action="store_true", help="use uniform ambient lighting (no directional shading)")
     parser.add_argument("--floor-tex", type=str, default="white", help="floor texture name (see miniworld/textures), default white")

@@ -40,6 +40,7 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         agent_box_allow_overlap=False,
         box_random_orientation=False,
         blocks_static=False,
+        spawn_wall_buffer=None,
         grid_mode=False,
         grid_vel_min=-1,
         grid_vel_max=1,
@@ -55,6 +56,7 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         self.box_random_orientation = bool(box_random_orientation)
         self.blocks_static = bool(blocks_static)
         self.grid_mode = bool(grid_mode)
+        self.spawn_wall_buffer = float(spawn_wall_buffer) if spawn_wall_buffer is not None else None
         self.grid_vel_min = int(grid_vel_min)
         self.grid_vel_max = int(grid_vel_max)
         self.num_blocks = int(num_blocks)
@@ -78,6 +80,7 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
             wall_tex,
             ceil_tex,
             blocks_static,
+            spawn_wall_buffer,
             box_speed_scale,
             box_allow_overlap,
             agent_box_allow_overlap,
@@ -111,13 +114,35 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         else:
             chosen_colors = list(self.np_random.choice(self.color_pool, size=self.num_blocks, replace=True))
 
+        # Helper to compute room extents with optional spawn buffer
+        def _spawn_extents(ent_radius: float):
+            if self.spawn_wall_buffer is None:
+                return None, None, None, None
+            buf = float(self.spawn_wall_buffer) + float(ent_radius)
+            min_x = 0.0 + buf
+            max_x = self.size - buf
+            min_z = 0.0 + buf
+            max_z = self.size - buf
+            # Ensure valid ranges
+            if max_x <= min_x or max_z <= min_z:
+                return None, None, None, None
+            return min_x, max_x, min_z, max_z
+
         # Place blocks with random sizes
         for color in chosen_colors:
             box = Box(color=color, size=self.np_random.uniform(0.6, 0.85))
-            self.place_entity(box)
+            mnx, mxx, mnz, mxz = _spawn_extents(box.radius if hasattr(box, 'radius') else 0.3)
+            self.place_entity(
+                box,
+                min_x=mnx,
+                max_x=mxx,
+                min_z=mnz,
+                max_z=mxz,
+            )
 
-        # Place the agent at a random position
-        self.place_agent()
+        # Place the agent at a random position with optional wall buffer
+        mnx, mxx, mnz, mxz = _spawn_extents(self.agent.radius if hasattr(self.agent, 'radius') else 0.2)
+        self.place_agent(min_x=mnx, max_x=mxx, min_z=mnz, max_z=mxz)
 
     def _quantize_heading(self):
         q = (math.pi / 2)
