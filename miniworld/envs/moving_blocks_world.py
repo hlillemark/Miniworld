@@ -15,6 +15,9 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
     end due to time limits.
 
     Options:
+    - floor_tex: texture name for the floor (default "white")
+    - wall_tex: texture name for the walls (default "white")
+    - ceil_tex: texture name for the ceiling (default "white")
     - box_speed_scale: scales continuous box speed when not in grid mode
     - box_allow_overlap: if True, boxes ignore box-box collisions
     - agent_box_allow_overlap: if True, agent and boxes ignore collisions
@@ -29,10 +32,14 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
     def __init__(
         self,
         size=12,
+        floor_tex="white",
+        wall_tex="white",
+        ceil_tex="white",
         box_speed_scale=1.0,
         box_allow_overlap=False,
         agent_box_allow_overlap=False,
         box_random_orientation=False,
+        blocks_static=False,
         grid_mode=False,
         grid_vel_min=-1,
         grid_vel_max=1,
@@ -46,12 +53,17 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         self.box_allow_overlap = bool(box_allow_overlap)
         self.agent_box_allow_overlap = bool(agent_box_allow_overlap)
         self.box_random_orientation = bool(box_random_orientation)
+        self.blocks_static = bool(blocks_static)
         self.grid_mode = bool(grid_mode)
         self.grid_vel_min = int(grid_vel_min)
         self.grid_vel_max = int(grid_vel_max)
         self.num_blocks = int(num_blocks)
         self.allow_color_repeat = bool(allow_color_repeat)
         self.color_pool = list(color_pool) if color_pool is not None else list(COLOR_NAMES)
+        # Store texture overrides
+        self._floor_tex_override = str(floor_tex) if floor_tex is not None else None
+        self._wall_tex_override = str(wall_tex) if wall_tex is not None else None
+        self._ceil_tex_override = str(ceil_tex) if ceil_tex is not None else None
         super().__init__(size=size, **kwargs)
         # Keep for compatibility; not used for reward anymore
         self.near_margin = (
@@ -62,6 +74,10 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         utils.EzPickle.__init__(
             self,
             size,
+            floor_tex,
+            wall_tex,
+            ceil_tex,
+            blocks_static,
             box_speed_scale,
             box_allow_overlap,
             agent_box_allow_overlap,
@@ -78,7 +94,16 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
 
     def _gen_world(self):
         # Create a rectangular room
-        self.add_rect_room(min_x=0, max_x=self.size, min_z=0, max_z=self.size)
+        room_kwargs = {}
+        if getattr(self, "_floor_tex_override", None) is not None:
+            room_kwargs["floor_tex"] = self._floor_tex_override
+        if getattr(self, "_wall_tex_override", None) is not None:
+            room_kwargs["wall_tex"] = self._wall_tex_override
+        if getattr(self, "_ceil_tex_override", None) is not None:
+            room_kwargs["ceil_tex"] = self._ceil_tex_override
+        # wall_tex="concrete",
+        # ceil_tex="concrete_tiles",
+        self.add_rect_room(min_x=0, max_x=self.size, min_z=0, max_z=self.size, **room_kwargs)
 
         # Choose colors for the blocks
         if not self.allow_color_repeat and self.num_blocks <= len(self.color_pool):
@@ -136,6 +161,10 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
 
         for ent in self.entities:
             if not isinstance(ent, Box):
+                continue
+            if self.blocks_static:
+                # Do not assign velocities for static mode
+                ent.velocity = np.array([0.0, 0.0, 0.0], dtype=float)
                 continue
             if self.grid_mode:
                 while True:
@@ -209,7 +238,9 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
                 continue
             if carrying is not None and ent is carrying:
                 continue
-
+            if self.blocks_static:
+                # No motion updates for static mode
+                continue
             if not hasattr(ent, "velocity"):
                 theta = self.np_random.uniform(-math.pi, math.pi)
                 rand = self.np_random if self.domain_rand else None

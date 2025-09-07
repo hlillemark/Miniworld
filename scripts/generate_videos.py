@@ -23,21 +23,24 @@ command 7pm aug 20
 single generation:
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlocksWorld-v0 \
-  --policy biased_random --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
+  --policy biased_random --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 300 --out-prefix ./out/run_move --debug --room-size 16
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 300 --out-prefix ./out/run_move --debug --room-size 16 --blocks-static
+
+single static generation
+add --blocks-static
   
 multi generation: 
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlocksWorld-v0 \
-  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
+  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 16 --no-time-limit --even-lighting \
-  --dataset-root ./out/futureproof_evenlighting --num-videos 20000 --block-size 256 --num-processes 64
+  --steps 500 --room-size 16 --no-time-limit \
+  --dataset-root ./out/multi_gen --num-videos 20000 --block-size 256 --num-processes 64
   
 # IMPORTANT NOTE FOR HEADLESS MODE RENDERING ON SERVERS: 
 run like: 
@@ -125,6 +128,15 @@ def build_env(args) -> gym.Env:
     if args.room_size is not None:
         env_kwargs["size"] = int(args.room_size)
 
+    # Floor texture override if provided
+    if getattr(args, "floor_tex", None):
+        env_kwargs["floor_tex"] = str(args.floor_tex)
+    # Wall/Ceiling texture override if provided
+    if getattr(args, "wall_tex", None):
+        env_kwargs["wall_tex"] = str(args.wall_tex)
+    if getattr(args, "ceil_tex", None):
+        env_kwargs["ceil_tex"] = str(args.ceil_tex)
+
     # Map supported custom kwargs
     if args.box_speed_scale is not None:
         env_kwargs["box_speed_scale"] = args.box_speed_scale
@@ -138,6 +150,8 @@ def build_env(args) -> gym.Env:
         env_kwargs["grid_mode"] = True
         env_kwargs["grid_vel_min"] = int(args.grid_vel_min)
         env_kwargs["grid_vel_max"] = int(args.grid_vel_max)
+    if getattr(args, "blocks_static", False):
+        env_kwargs["blocks_static"] = True
 
     # Build params so first reset uses them
     params = None
@@ -170,6 +184,10 @@ def build_env(args) -> gym.Env:
             "grid_mode",
             "grid_vel_min",
             "grid_vel_max",
+            "floor_tex",
+            "blocks_static",
+            "wall_tex",
+            "ceil_tex",
         ]:
             env_kwargs.pop(k, None)
         env = gym.make(args.env_name, **env_kwargs)
@@ -559,12 +577,16 @@ def main():
     parser.add_argument("--box-allow-overlap", action="store_true")
     parser.add_argument("--agent-box-allow-overlap", action="store_true")
     parser.add_argument("--box-random-orientation", action="store_true")
+    parser.add_argument("--blocks-static", action="store_true", help="do not move boxes; keep them static")
     parser.add_argument("--grid-mode", action="store_true")
     parser.add_argument("--grid-vel-min", type=int, default=-1)
     parser.add_argument("--grid-vel-max", type=int, default=1)
     parser.add_argument("--debug", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--room-size", type=int, default=None, help="square room side length in meters (e.g., 12)")
     parser.add_argument("--even-lighting", action="store_true", help="use uniform ambient lighting (no directional shading)")
+    parser.add_argument("--floor-tex", type=str, default="white", help="floor texture name (see miniworld/textures), default white")
+    parser.add_argument("--wall-tex", type=str, default="white", help="wall texture name, default white")
+    parser.add_argument("--ceil-tex", type=str, default="white", help="ceiling texture name, default white")
 
     # Parallel dataset generation
     parser.add_argument("--dataset-root", type=str, default=None, help="if set, run in parallel dataset generation mode and write outputs under this root")
