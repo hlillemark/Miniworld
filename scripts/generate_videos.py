@@ -58,6 +58,19 @@ python -m scripts.generate_videos \
 
 import torch, torchvision.io as io; vid_depth = io.read_video("/Users/hansen/Desktop/ucsd/Miniworld/out/run_move_rgb.mp4", pts_unit="sec")[0].permute(0,3,1,2).to(torch.float32).div_(255)
 
+
+
+static generation for dfot map experiment 
+
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -0 --grid-vel-max 0 --blocks-static \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --room-size 16 --no-time-limit \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_training_w_map --num-videos 20000 --block-size 256 --num-processes 32
+
 """
 
 import argparse
@@ -434,30 +447,6 @@ def write_mp4_rgb(out_path: str, frames: np.ndarray, fps: int = 15):
             writer.append_data(frame)
 
 
-def write_mp4_depth(out_path: str, depth_frames: np.ndarray, fps: int = 15):
-    import imageio
-
-    # Normalize depth to 0..255 for visualization; keep as grayscale
-    d = depth_frames
-    # Clip extreme far distances for visibility
-    d = np.clip(d, 0.0, np.percentile(d, 99.5))
-    d = d / (d.max() + 1e-6)
-    d_uint8 = (d * 255).astype(np.uint8)
-    d_uint8 = d_uint8.squeeze(-1)  # T,H,W
-    out_dir = os.path.dirname(out_path) or "."
-    os.makedirs(out_dir, exist_ok=True)
-    with imageio.get_writer(
-        out_path,
-        fps=fps,
-        codec="libx264",
-        format="FFMPEG",
-        pixelformat="yuv420p",
-        bitrate="8M",
-    ) as writer:
-        for frame in d_uint8:
-            writer.append_data(frame)
-
-
 def _generate_one(idx: int, ns: SimpleNamespace):
     # Construct per-item args namespace for env
     args = ns.args
@@ -510,7 +499,8 @@ def _generate_one(idx: int, ns: SimpleNamespace):
     )
 
     write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
-    write_mp4_depth(f"{out_prefix}_depth.mp4", depth)
+    # Save raw depth (float32) without quantization
+    torch.save(torch.from_numpy(depth).to(torch.float32), f"{out_prefix}_depth.pt")
     torch.save(
         {
             "actions": torch.tensor(actions, dtype=torch.long),
@@ -649,7 +639,8 @@ def main():
 
     # Save outputs
     write_mp4_rgb(f"{args.out_prefix}_rgb.mp4", rgb)
-    write_mp4_depth(f"{args.out_prefix}_depth.mp4", depth)
+    # Save raw depth (float32) without quantization
+    torch.save(torch.from_numpy(depth).to(torch.float32), f"{args.out_prefix}_depth.pt")
     torch.save(
         {
             "actions": torch.tensor(actions, dtype=torch.long),
