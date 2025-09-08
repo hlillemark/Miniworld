@@ -68,7 +68,7 @@ python -m scripts.generate_videos \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -0 --grid-vel-max 0 --blocks-static \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 16 --no-time-limit \
+  --steps 500 --room-size 16 --no-time-limit --output-2d-map \
   --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_training_w_map --num-videos 20000 --block-size 256 --num-processes 32
 
 """
@@ -76,7 +76,7 @@ python -m scripts.generate_videos \
 import argparse
 import math
 import os
-from typing import Tuple
+from typing import Tuple, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -353,10 +353,12 @@ def run_rollout(
     np.ndarray,  # delta_xz (T,2)
     np.ndarray,  # delta_dir (T,)
     np.ndarray,  # agent_dir (T,)
+    Optional[dict],  # top_view_scale (or None)
 ]:
     obs_list = []
     depth_list = []
     top_list = [] if capture_top else None
+    top_view_scale: Optional[dict] = None
     actions = []
     agent_pos_list = []
     agent_dir_list = []
@@ -374,8 +376,17 @@ def run_rollout(
     agent_pos_list.append(env.unwrapped.agent.pos.copy())
     agent_dir_list.append(float(env.unwrapped.agent.dir))
     if capture_top:
-        top = env.unwrapped.render_top_view(env.unwrapped.vis_fb, render_agent=True)
+        # Capture scale once on the first call
+        top, scale = env.unwrapped.render_top_view(
+            env.unwrapped.vis_fb, render_agent=True, return_scale=True
+        )
         top_list.append(top)
+        top_view_scale = {
+            "x_scale": float(scale["x_scale"]),
+            "z_scale": float(scale["z_scale"]),
+            "x_offset": float(scale["x_offset"]),
+            "z_offset": float(scale["z_offset"]),
+        }
 
     if policy_name == "back_and_forth":
         policy = BackAndForthPolicy(segment_len=segment_len)
@@ -426,7 +437,7 @@ def run_rollout(
     # Absolute heading per kept frame (length T)
     agent_dir = agent_dir_full[:steps_executed]
 
-    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir, agent_dir
+    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale
 
 
 def write_mp4_rgb(out_path: str, frames: np.ndarray, fps: int = 15):
@@ -488,7 +499,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         lookahead_mult=args.lookahead_mult,
     )
 
-    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
@@ -501,15 +512,15 @@ def _generate_one(idx: int, ns: SimpleNamespace):
     write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
     # Save raw depth (float32) without quantization
     torch.save(torch.from_numpy(depth).to(torch.float32), f"{out_prefix}_depth.pt")
-    torch.save(
-        {
-            "actions": torch.tensor(actions, dtype=torch.long),
-            "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
-            "delta_xz": torch.tensor(delta_xz, dtype=torch.float32),
-            "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
-        },
-        f"{out_prefix}_actions.pt",
-    )
+    meta = {
+        "actions": torch.tensor(actions, dtype=torch.long),
+        "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
+        "delta_xz": torch.tensor(delta_xz, dtype=torch.float32),
+        "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
+    }
+    if args.output_2d_map and top_view_scale is not None:
+        meta["top_view_scale"] = {k: float(v) for k, v in top_view_scale.items()}
+    torch.save(meta, f"{out_prefix}_actions.pt")
     if args.debug_join and top is not None:
         H, W = rgb.shape[1], rgb.shape[2]
         if top.shape[1] != H or top.shape[2] != W:
@@ -627,7 +638,7 @@ def main():
         lookahead_mult=args.lookahead_mult,
     )
 
-    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
@@ -641,16 +652,19 @@ def main():
     write_mp4_rgb(f"{args.out_prefix}_rgb.mp4", rgb)
     # Save raw depth (float32) without quantization
     torch.save(torch.from_numpy(depth).to(torch.float32), f"{args.out_prefix}_depth.pt")
-    torch.save(
-        {
-            "actions": torch.tensor(actions, dtype=torch.long),
-            "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
-            "delta_xz": torch.tensor(delta_xz, dtype=torch.float32),
-            "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
-            "agent_dir": torch.tensor(agent_dir, dtype=torch.float32),
-        },
-        f"{args.out_prefix}_actions.pt",
-    )
+    meta = {
+        "actions": torch.tensor(actions, dtype=torch.long),
+        "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
+        "delta_xz": torch.tensor(delta_xz, dtype=torch.float32),
+        "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
+        "agent_dir": torch.tensor(agent_dir, dtype=torch.float32),
+    }
+    if args.output_2d_map and top_view_scale is not None:
+        # Save mapping to convert world (x,z) -> pixel (u,v)
+        meta["top_view_scale"] = {
+            k: float(v) for k, v in top_view_scale.items()
+        }
+    torch.save(meta, f"{args.out_prefix}_actions.pt")
 
     if args.debug_join and top is not None:
         # Concatenate RGB (left) and Top (right)
