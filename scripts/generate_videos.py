@@ -517,6 +517,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         "agent_pos": torch.tensor(agent_pos, dtype=torch.float32),
         "delta_xz": torch.tensor(delta_xz, dtype=torch.float32),
         "delta_dir": torch.tensor(delta_dir, dtype=torch.float32),
+        "agent_dir": torch.tensor(agent_dir, dtype=torch.float32),
     }
     if args.output_2d_map and top_view_scale is not None:
         meta["top_view_scale"] = {k: float(v) for k, v in top_view_scale.items()}
