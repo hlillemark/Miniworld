@@ -27,8 +27,8 @@ python -m scripts.generate_videos \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 13 \
-  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate 
+  --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 10 \
+  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --noop-prob 0.3 --cam-fov-y 90
 
 single static generation
 add --blocks-static
@@ -187,6 +187,12 @@ def build_env(args) -> gym.Env:
         if args.forward_step is not None:
             v = float(args.forward_step)
             params.set("forward_step", v, v, v)
+    # Camera vertical field of view (degrees)
+    if getattr(args, "cam_fov_y", None) is not None:
+        if params is None:
+            params = DEFAULT_PARAMS.copy()
+        v = float(args.cam_fov_y)
+        params.set("cam_fov_y", v, v, v)
     # Even lighting: force ambient 1, diffuse 0 regardless of domain rand
     if getattr(args, "even_lighting", False):
         if params is None:
@@ -345,14 +351,25 @@ class BiasedRandomPolicy:
 
 
 class CenterRotatePolicy:
-    """At each timestep, rotate randomly (left or right), never move forward."""
+    """
+    At each timestep, rotate randomly (left or right), never move forward.
 
-    def __init__(self, env: gym.Env):
+    Dataset convention for rotation experiments:
+    - We reserve action id 3 to mean NOOP (do nothing) in saved actions.
+      In the environment, id 3 is "move_back"; to make it a true no-op,
+      set --forward-step 0 so that action 3 has no effect.
+    """
+
+    def __init__(self, env: gym.Env, noop_prob: float = 0.0):
         self.env = env.unwrapped
         self.rng = self.env.np_random
+        self.noop_prob = float(noop_prob)
 
     def action(self, step_idx: int) -> int:
         a = self.env.actions
+        # With probability noop_prob, emit action id 4 as a NOOP (dataset convention)
+        if self.rng.random() < self.noop_prob:
+            return a.pickup  # id 4
         return a.turn_left if (self.rng.random() < 0.5) else a.turn_right
 
 
@@ -416,7 +433,7 @@ def run_rollout(
         policy = BackAndForthPolicy(segment_len=segment_len)
         act_fn = policy.action
     elif policy_name == "center_rotate":
-        policy = CenterRotatePolicy(env=env)
+        policy = CenterRotatePolicy(env=env, noop_prob=policy_kwargs.get("noop_prob", 0.0))
         act_fn = policy.action
     else:
         policy = BiasedRandomPolicy(env=env, **policy_kwargs)
@@ -524,6 +541,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         wall_buffer=args.wall_buffer,
         avoid_turning_into_walls=args.avoid_turning_into_walls,
         lookahead_mult=args.lookahead_mult,
+        noop_prob=getattr(args, "noop_prob", 0.0),
     )
 
     rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
@@ -620,6 +638,7 @@ def main():
     parser.add_argument("--output-2d-map", dest="output_2d_map", action="store_true", help="save the top-view map as a separate MP4 named *_map_2d.mp4")
     parser.add_argument("--spawn-wall-buffer", type=float, default=1.0, help="extra buffer from walls when spawning agent and boxes (meters)")
     parser.add_argument("--room-size", type=int, default=12, help="square room side length in meters (e.g., 12)")
+    parser.add_argument("--cam-fov-y", type=float, default=None, help="camera vertical field of view in degrees (locks to this value if provided)")
     parser.add_argument("--even-lighting", action="store_true", help="use uniform ambient lighting (no directional shading)")
     parser.add_argument("--floor-tex", type=str, default="concrete", help="floor texture name (see miniworld/textures), default white")
     # parser.add_argument("--floor-tex", type=str, default="ceiling_tile_noborder", help="floor texture name (see miniworld/textures), default white")
@@ -653,6 +672,8 @@ def main():
     parser.add_argument("--lookahead-mult", type=float, default=2.0, help="biased_random: lookahead distance multiplier relative to max forward step")
     # Agent spawn option: place agent at the center (uses env support)
     parser.add_argument("--agent-center-start", action="store_true", help="spawn the agent at the room center (top-left of middle for even sizes)")
+    # Rotation experiment: probability to emit NOOP (dataset convention uses action id 3)
+    parser.add_argument("--noop-prob", type=float, default=0.0, help="for center_rotate policy: probability to emit action id 3 as a NOOP; set --forward-step 0 so it has no effect")
 
     args = parser.parse_args()
 
@@ -671,6 +692,7 @@ def main():
         wall_buffer=args.wall_buffer,
         avoid_turning_into_walls=args.avoid_turning_into_walls,
         lookahead_mult=args.lookahead_mult,
+        noop_prob=args.noop_prob,
     )
 
     rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
