@@ -32,9 +32,9 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
     def __init__(
         self,
         size=12,
-        floor_tex="white",
+        floor_tex="concrete",
         wall_tex="white",
-        ceil_tex="white",
+        ceil_tex="ceiling_tile_noborder",
         box_speed_scale=1.0,
         box_allow_overlap=False,
         agent_box_allow_overlap=False,

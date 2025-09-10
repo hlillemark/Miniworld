@@ -19,8 +19,8 @@ Outputs:
   - <out-prefix>_actions.pt
   
   
-command 7pm aug 20
-single generation:
+command 3pm sep 10
+single generation (static, center rotate):
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlockWorld-v0 \
   --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
@@ -59,10 +59,7 @@ python -m scripts.generate_videos \
 
 import torch, torchvision.io as io; vid_depth = io.read_video("/Users/hansen/Desktop/ucsd/Miniworld/out/run_move_rgb.mp4", pts_unit="sec")[0].permute(0,3,1,2).to(torch.float32).div_(255)
 
-
-
-static generation for dfot map experiment 
-
+# static generation for dfot map experiment 
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlockWorld-v0 \
   --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
@@ -72,6 +69,25 @@ python -m scripts.generate_videos \
   --steps 500 --room-size 16 --no-time-limit --output-2d-map \
   --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_training_w_map --num-videos 20000 --block-size 256 --num-processes 32
 
+# static generation center rotate with map
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -0 --grid-vel-max 0 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --room-size 10 --no-time-limit --output-2d-map \
+  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --cam-fov-y 90 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_center_rotate_training --num-videos 20000 --block-size 256 --num-processes 32
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -0 --grid-vel-max 0 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --room-size 10 --no-time-limit --output-2d-map \
+  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --cam-fov-y 90 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_center_rotate_validation --num-videos 1000 --block-size 64 --num-processes 32
 """
 
 import argparse
@@ -202,29 +218,7 @@ def build_env(args) -> gym.Env:
     if params is not None:
         env_kwargs["params"] = params
 
-    try:
-        env = gym.make(args.env_name, **env_kwargs)
-    except TypeError:
-        # strip unsupported extras
-        for k in [
-            "box_speed_scale",
-            "box_allow_overlap",
-            "agent_box_allow_overlap",
-            "box_random_orientation",
-            "grid_mode",
-            "grid_vel_min",
-            "grid_vel_max",
-            "floor_tex",
-            "blocks_static",
-            "wall_tex",
-            "ceil_tex",
-            "spawn_wall_buffer",
-            "block_size_xy",
-            "block_height",
-            "agent_center_start",
-        ]:
-            env_kwargs.pop(k, None)
-        env = gym.make(args.env_name, **env_kwargs)
+    env = gym.make(args.env_name, **env_kwargs)
 
     # Domain randomization and time limit controls (like manual_control)
     env_unwrapped = env.unwrapped
