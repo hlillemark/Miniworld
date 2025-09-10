@@ -13,14 +13,31 @@ python -m scripts.generate_videos_batch \
   -- --steps 300 --room-size 10 --policy center_rotate --agent-center-start \
      --block-size-xy 0.7 --block-height 1.5 --cam-fov-y 90
      
+# VERSION FOR static center rotate with worldsize 10 testing:
+
 python -m scripts.generate_videos_batch \
   --env-name MiniWorld-MovingBlockWorld-v0 \
-  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_center_rotate_validation \
+  --dataset-root /data/hansen/wm-memory/data/blockworld/static_center_rotate_validation \
   --num-videos 1000 --block-size 64 --num-processes 32 \
-  -- --steps 500 --room-size 10 --no-time-limit --output-2d-map \
-     --blocks-static --block-size-xy 0.7 --block-height 1.5 \
-     --agent-center-start --policy center_rotate --cam-fov-y 90 \
-     --render-width 128 --render-height 128 --obs-width 128 --obs-height 128
+  -- \
+  --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -0 --grid-vel-max 0 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --room-size 10 --no-time-limit --output-2d-map \
+  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --cam-fov-y 90
+      
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/wm-memory/data/blockworld/static_center_rotate_training \
+  --num-videos 20000 --block-size 256 --num-processes 32 \
+  -- \
+  --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -0 --grid-vel-max 0 \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --room-size 10 --no-time-limit --output-2d-map \
+  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --cam-fov-y 90
 
 Note the positional "--" separator: all arguments after it are forwarded
 verbatim to scripts.generate_videos (single-run).
