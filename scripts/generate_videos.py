@@ -578,25 +578,11 @@ def _generate_one(idx: int, ns: SimpleNamespace):
 
 
 def run_parallel_dataset(args):
-    from tqdm import tqdm
-
-    assert args.dataset_root and args.num_videos > 0, "Provide --dataset-root and --num-videos"
-    ds_root = Path(args.dataset_root)
-    ds_root.mkdir(parents=True, exist_ok=True)
-
-    ns = SimpleNamespace(
-        args=args,
-        dataset_root=str(ds_root),
-        block_size=int(args.block_size),
-        file_digits=int(args.file_digits),
+    # DEPRECATED: in-process parallel dataset generation. Use scripts.generate_videos_batch instead.
+    # Leaving this stub to avoid breaking callers; consider removing in future.
+    raise RuntimeError(
+        "Deprecated: Use 'python -m scripts.generate_videos_batch -- ...' to run multi-generation via subprocesses."
     )
-
-    indices = list(range(int(args.num_videos)))
-
-    with ProcessPoolExecutor(max_workers=int(args.num_processes)) as ex:
-        futures = {ex.submit(_generate_one, idx, ns): idx for idx in indices}
-        for _ in tqdm(as_completed(futures), total=len(futures), desc="Generating videos"):
-            pass
 
 
 def main():
@@ -642,12 +628,12 @@ def main():
     parser.add_argument("--block-size-xy", type=float, default=None, help="if set, use this x/z size (meters) for all blocks")
     parser.add_argument("--block-height", type=float, default=None, help="if set, use this height (meters) for all blocks")
 
-    # Parallel dataset generation
-    parser.add_argument("--dataset-root", type=str, default=None, help="if set, run in parallel dataset generation mode and write outputs under this root")
-    parser.add_argument("--num-videos", type=int, default=0, help="total number of videos to generate (parallel mode)")
-    parser.add_argument("--block-size", type=int, default=100, help="number of videos per block subdirectory (parallel mode)")
-    parser.add_argument("--num-processes", type=int, default=4, help="number of worker processes (parallel mode)")
-    parser.add_argument("--file-digits", type=int, default=4, help="zero-padding width for filenames inside each block (parallel mode)")
+    # Parallel dataset generation (DEPRECATED): use scripts.generate_videos_batch
+    parser.add_argument("--dataset-root", type=str, default=None, help="DEPRECATED: use scripts.generate_videos_batch for multi-generation")
+    parser.add_argument("--num-videos", type=int, default=0, help="DEPRECATED")
+    parser.add_argument("--block-size", type=int, default=100, help="DEPRECATED")
+    parser.add_argument("--num-processes", type=int, default=4, help="DEPRECATED")
+    parser.add_argument("--file-digits", type=int, default=4, help="DEPRECATED")
     parser.add_argument(
         "--seed",
         type=int,
