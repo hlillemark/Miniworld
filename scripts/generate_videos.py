@@ -28,7 +28,7 @@ python -m scripts.generate_videos \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
   --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 10 \
-  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --noop-prob 0.3 --cam-fov-y 90
+  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --cam-fov-y 90
 
 single static generation
 add --blocks-static
@@ -352,25 +352,25 @@ class BiasedRandomPolicy:
 
 class CenterRotatePolicy:
     """
-    At each timestep, rotate randomly (left or right), never move forward.
+    Rotation experiment policy.
+    Each step choose uniformly among {turn_left(0), turn_right(1), NOOP(4)}.
 
-    Dataset convention for rotation experiments:
-    - We reserve action id 3 to mean NOOP (do nothing) in saved actions.
-      In the environment, id 3 is "move_back"; to make it a true no-op,
-      set --forward-step 0 so that action 3 has no effect.
+    Dataset convention: action id 4 is used as NOOP. In-env, id 4 is "pickup";
+    set --forward-step 0 to make it have no effect.
     """
 
-    def __init__(self, env: gym.Env, noop_prob: float = 0.0):
+    def __init__(self, env: gym.Env):
         self.env = env.unwrapped
         self.rng = self.env.np_random
-        self.noop_prob = float(noop_prob)
 
     def action(self, step_idx: int) -> int:
         a = self.env.actions
-        # With probability noop_prob, emit action id 4 as a NOOP (dataset convention)
-        if self.rng.random() < self.noop_prob:
-            return a.pickup  # id 4
-        return a.turn_left if (self.rng.random() < 0.5) else a.turn_right
+        r = int(self.rng.integers(0, 3))  # 0,1,2 -> left,right,noop
+        if r == 0:
+            return a.turn_left
+        if r == 1:
+            return a.turn_right
+        return a.pickup  # id 4 used as NOOP in datasets
 
 
 def _wrap_angle(a: np.ndarray) -> np.ndarray:
@@ -433,7 +433,7 @@ def run_rollout(
         policy = BackAndForthPolicy(segment_len=segment_len)
         act_fn = policy.action
     elif policy_name == "center_rotate":
-        policy = CenterRotatePolicy(env=env, noop_prob=policy_kwargs.get("noop_prob", 0.0))
+        policy = CenterRotatePolicy(env=env)
         act_fn = policy.action
     else:
         policy = BiasedRandomPolicy(env=env, **policy_kwargs)
@@ -541,7 +541,6 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         wall_buffer=args.wall_buffer,
         avoid_turning_into_walls=args.avoid_turning_into_walls,
         lookahead_mult=args.lookahead_mult,
-        noop_prob=getattr(args, "noop_prob", 0.0),
     )
 
     rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
@@ -672,8 +671,6 @@ def main():
     parser.add_argument("--lookahead-mult", type=float, default=2.0, help="biased_random: lookahead distance multiplier relative to max forward step")
     # Agent spawn option: place agent at the center (uses env support)
     parser.add_argument("--agent-center-start", action="store_true", help="spawn the agent at the room center (top-left of middle for even sizes)")
-    # Rotation experiment: probability to emit NOOP (dataset convention uses action id 3)
-    parser.add_argument("--noop-prob", type=float, default=0.0, help="for center_rotate policy: probability to emit action id 3 as a NOOP; set --forward-step 0 so it has no effect")
 
     args = parser.parse_args()
 
@@ -692,7 +689,6 @@ def main():
         wall_buffer=args.wall_buffer,
         avoid_turning_into_walls=args.avoid_turning_into_walls,
         lookahead_mult=args.lookahead_mult,
-        noop_prob=args.noop_prob,
     )
 
     rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
