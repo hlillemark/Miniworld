@@ -169,7 +169,6 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
             # Clamp to buffered extents for safety
             cx = min(max(cx, mnx), mxx)
             cz = min(max(cz, mnz), mxz)
-            print("Spawning at", cx, cz)
             center_pos = np.array([float(cx), 0.0, float(cz)], dtype=float)
             self.place_agent(pos=center_pos)
         else:
