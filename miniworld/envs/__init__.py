@@ -7,7 +7,7 @@ from miniworld.envs.maze import Maze, MazeS2, MazeS3, MazeS3Fast
 from miniworld.envs.oneroom import OneRoom, OneRoomS6, OneRoomS6Fast
 from miniworld.envs.pickupobjects import PickupObjects
 from miniworld.envs.putnext import PutNext
-from miniworld.envs.moving_blocks_world import MovingBlocksWorld
+from miniworld.envs.moving_blockworld import MovingBlockWorld
 from miniworld.envs.roomobjects import RoomObjects
 from miniworld.envs.sidewalk import Sidewalk
 from miniworld.envs.sign import Sign
@@ -29,7 +29,7 @@ __all__ = [
     "OneRoomS6Fast",
     "PickupObjects",
     "PutNext",
-    "MovingBlocksWorld",
+    "MovingBlockWorld",
     "RoomObjects",
     "Sidewalk",
     "Sign",
@@ -104,8 +104,8 @@ gym.register(
 )
 
 gym.register(
-    id="MiniWorld-MovingBlocksWorld-v0",
-    entry_point="miniworld.envs.moving_blocks_world:MovingBlocksWorld",
+    id="MiniWorld-MovingBlockWorld-v0",
+    entry_point="miniworld.envs.moving_blockworld:MovingBlockWorld",
 )
 
 gym.register(
