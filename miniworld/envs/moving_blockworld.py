@@ -8,7 +8,7 @@ from miniworld.math import intersect_circle_segs
 from miniworld.miniworld import MiniWorldEnv
 
 
-class MovingBlocksWorld(PutNext, utils.EzPickle):
+class MovingBlockWorld(PutNext, utils.EzPickle):
     """
     Single-room environment derived from PutNext where colored boxes move
     autonomously each step. Reward-based termination is disabled: episodes only
@@ -48,6 +48,9 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         allow_color_repeat=False,
         color_pool=None,
         near_margin=None,
+        block_size_xy=None,
+        block_height=None,
+        agent_center_start=False,
         **kwargs,
     ):
         self.box_speed_scale = float(box_speed_scale)
@@ -62,6 +65,11 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
         self.num_blocks = int(num_blocks)
         self.allow_color_repeat = bool(allow_color_repeat)
         self.color_pool = list(color_pool) if color_pool is not None else list(COLOR_NAMES)
+        # Optional uniform block sizing controls
+        # If provided, all blocks will use (block_size_xy, block_height, block_size_xy)
+        self.block_size_xy = None if block_size_xy is None else float(block_size_xy)
+        self.block_height = None if block_height is None else float(block_height)
+        self.agent_center_start = bool(agent_center_start)
         # Store texture overrides
         self._floor_tex_override = str(floor_tex) if floor_tex is not None else None
         self._wall_tex_override = str(wall_tex) if wall_tex is not None else None
@@ -92,6 +100,9 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
             self.allow_color_repeat,
             self.color_pool,
             self.near_margin,
+            self.block_size_xy,
+            self.block_height,
+            self.agent_center_start,
             **kwargs,
         )
 
@@ -120,29 +131,87 @@ class MovingBlocksWorld(PutNext, utils.EzPickle):
                 return None, None, None, None
             buf = float(self.spawn_wall_buffer) + float(ent_radius)
             min_x = 0.0 + buf
-            max_x = self.size - buf
+            max_x = self.size + buf - 1.0
             min_z = 0.0 + buf
-            max_z = self.size - buf
+            max_z = self.size + buf - 1.0 # Plus buf because the buf is padded from the front # Minus 1 because the room size in grid mode is 1 less than actual.
             # Ensure valid ranges
             if max_x <= min_x or max_z <= min_z:
                 return None, None, None, None
             return min_x, max_x, min_z, max_z
 
-        # Place blocks with random sizes
-        for color in chosen_colors:
-            box = Box(color=color, size=self.np_random.uniform(0.6, 0.85))
-            mnx, mxx, mnz, mxz = _spawn_extents(box.radius if hasattr(box, 'radius') else 0.3)
-            self.place_entity(
-                box,
-                min_x=mnx,
-                max_x=mxx,
-                min_z=mnz,
-                max_z=mxz,
-            )
+        # Place the agent before blocks: either centered or random within buffer
+        if self.agent_center_start:
+            # Compute the center of the spawnable area considering wall buffer
+            mnx, mxx, mnz, mxz = _spawn_extents(self.agent.radius if hasattr(self.agent, 'radius') else 0.5)
+            if mnx is None:
+                # No buffer; full room extents
+                mnx, mxx, mnz, mxz = 0.0, float(self.size), 0.0, float(self.size)
+            cx = (mnx + mxx) / 2.0
+            cz = (mnz + mxz) / 2.0
+            
+            # Adjust snapping per requested convention
+            if self.grid_mode:
+                # Favor top-left if midpoint is exactly an integer; else floor
+                if abs(cx - round(cx)) < 1e-6:
+                    cx = round(cx) - 1.0
+                else:
+                    cx = math.floor(cx)
+                if abs(cz - round(cz)) < 1e-6:
+                    cz = round(cz) - 1.0
+                else:
+                    cz = math.floor(cz)
+            else:
+                # If exactly centered on an integer, offset by 0.5 toward top-left
+                if abs(cx - round(cx)) < 1e-6:
+                    cx = cx - 0.5
+                if abs(cz - round(cz)) < 1e-6:
+                    cz = cz - 0.5
+            # Clamp to buffered extents for safety
+            cx = min(max(cx, mnx), mxx)
+            cz = min(max(cz, mnz), mxz)
+            print("Spawning at", cx, cz)
+            center_pos = np.array([float(cx), 0.0, float(cz)], dtype=float)
+            self.place_agent(pos=center_pos)
+        else:
+            mnx, mxx, mnz, mxz = _spawn_extents(self.agent.radius if hasattr(self.agent, 'radius') else 0.5)
+            self.place_agent(min_x=mnx, max_x=mxx, min_z=mnz, max_z=mxz)
 
-        # Place the agent at a random position with optional wall buffer
-        mnx, mxx, mnz, mxz = _spawn_extents(self.agent.radius if hasattr(self.agent, 'radius') else 0.2)
-        self.place_agent(min_x=mnx, max_x=mxx, min_z=mnz, max_z=mxz)
+        # Place blocks with either uniform or random sizes
+        for color in chosen_colors:
+            if (self.block_size_xy is not None) or (self.block_height is not None):
+                # Use provided controls; default footprint if only height provided
+                sx = self.block_size_xy if self.block_size_xy is not None else 0.75
+                sy = self.block_height if self.block_height is not None else sx
+                sz = sx
+                box = Box(color=color, size=np.array([sx, sy, sz], dtype=float))
+            else:
+                # Backward-compatible random cube size
+                box = Box(color=color, size=self.np_random.uniform(0.6, 0.85))
+            # Re-try placement if spawned exactly at the agent's (x,z)
+            attempts = 0
+            while True:
+                attempts += 1
+                mnx, mxx, mnz, mxz = _spawn_extents(box.radius if hasattr(box, 'radius') else 0.3)
+                self.place_entity(
+                    box,
+                    min_x=mnx,
+                    max_x=mxx,
+                    min_z=mnz,
+                    max_z=mxz,
+                )
+                # Compare only XZ for exact location match
+                if hasattr(self, 'agent') and (self.agent is not None):
+                    same_x = abs(float(box.pos[0]) - float(self.agent.pos[0])) < 1e-6
+                    same_z = abs(float(box.pos[2]) - float(self.agent.pos[2])) < 1e-6
+                    if same_x and same_z:
+                        # Remove and retry
+                        try:
+                            self.entities.remove(box)
+                        except ValueError:
+                            pass
+                        if attempts < 100:
+                            continue
+                break
 
     def _quantize_heading(self):
         q = (math.pi / 2)

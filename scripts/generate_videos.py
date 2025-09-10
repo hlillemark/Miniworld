@@ -6,7 +6,7 @@ Generate rollout videos (RGB and depth) and actions for a simple agent policy.
 Example usage (mirrors manual_control flags):
 
 python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
   --box-allow-overlap --agent-box-allow-overlap \
@@ -22,19 +22,20 @@ Outputs:
 command 7pm aug 20
 single generation:
 python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlocksWorld-v0 \
-  --policy biased_random --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 16 --blocks-static
+  --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 13 \
+  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate 
 
 single static generation
 add --blocks-static
   
 multi generation: 
 python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
   --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
@@ -48,7 +49,7 @@ MINIWORLD_HEADLESS=1 python -m scripts.generate_videos ...
 
 # NOTE: extra vae training samples generated like this: 
 python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
   --policy biased_random --forward-prob 0.9 --wall-buffer 0 --avoid-turning-into-walls --agent-box-allow-overlap \
   --turn-step-deg 45 --forward-step 0.5 \
   --grid-vel-min -1 --grid-vel-max 1 --box-random-orientation \
@@ -63,7 +64,7 @@ import torch, torchvision.io as io; vid_depth = io.read_video("/Users/hansen/Des
 static generation for dfot map experiment 
 
 python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlocksWorld-v0 \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
   --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -0 --grid-vel-max 0 --blocks-static \
@@ -167,6 +168,14 @@ def build_env(args) -> gym.Env:
         env_kwargs["blocks_static"] = True
     if getattr(args, "spawn_wall_buffer", None) is not None:
         env_kwargs["spawn_wall_buffer"] = float(args.spawn_wall_buffer)
+    # Uniform block sizing controls (MovingBlockWorld)
+    if getattr(args, "block_size_xy", None) is not None:
+        env_kwargs["block_size_xy"] = float(args.block_size_xy)
+    if getattr(args, "block_height", None) is not None:
+        env_kwargs["block_height"] = float(args.block_height)
+    # Agent spawn control: center start
+    if getattr(args, "agent_center_start", False):
+        env_kwargs["agent_center_start"] = True
 
     # Build params so first reset uses them
     params = None
@@ -204,6 +213,9 @@ def build_env(args) -> gym.Env:
             "wall_tex",
             "ceil_tex",
             "spawn_wall_buffer",
+            "block_size_xy",
+            "block_height",
+            "agent_center_start",
         ]:
             env_kwargs.pop(k, None)
         env = gym.make(args.env_name, **env_kwargs)
@@ -332,6 +344,18 @@ class BiasedRandomPolicy:
         return a.turn_left if self.rng.random() < probs[0] else a.turn_right
 
 
+class CenterRotatePolicy:
+    """At each timestep, rotate randomly (left or right), never move forward."""
+
+    def __init__(self, env: gym.Env):
+        self.env = env.unwrapped
+        self.rng = self.env.np_random
+
+    def action(self, step_idx: int) -> int:
+        a = self.env.actions
+        return a.turn_left if (self.rng.random() < 0.5) else a.turn_right
+
+
 def _wrap_angle(a: np.ndarray) -> np.ndarray:
     return (a + np.pi) % (2 * np.pi) - np.pi
 
@@ -390,6 +414,9 @@ def run_rollout(
 
     if policy_name == "back_and_forth":
         policy = BackAndForthPolicy(segment_len=segment_len)
+        act_fn = policy.action
+    elif policy_name == "center_rotate":
+        policy = CenterRotatePolicy(env=env)
         act_fn = policy.action
     else:
         policy = BiasedRandomPolicy(env=env, **policy_kwargs)
@@ -592,11 +619,16 @@ def main():
     parser.add_argument("--debug-join", dest="debug_join", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--output-2d-map", dest="output_2d_map", action="store_true", help="save the top-view map as a separate MP4 named *_map_2d.mp4")
     parser.add_argument("--spawn-wall-buffer", type=float, default=1.0, help="extra buffer from walls when spawning agent and boxes (meters)")
-    parser.add_argument("--room-size", type=int, default=None, help="square room side length in meters (e.g., 12)")
+    parser.add_argument("--room-size", type=int, default=12, help="square room side length in meters (e.g., 12)")
     parser.add_argument("--even-lighting", action="store_true", help="use uniform ambient lighting (no directional shading)")
-    parser.add_argument("--floor-tex", type=str, default="white", help="floor texture name (see miniworld/textures), default white")
+    parser.add_argument("--floor-tex", type=str, default="concrete", help="floor texture name (see miniworld/textures), default white")
+    # parser.add_argument("--floor-tex", type=str, default="ceiling_tile_noborder", help="floor texture name (see miniworld/textures), default white")
     parser.add_argument("--wall-tex", type=str, default="white", help="wall texture name, default white")
-    parser.add_argument("--ceil-tex", type=str, default="white", help="ceiling texture name, default white")
+    parser.add_argument("--ceil-tex", type=str, default="ceiling_tile_noborder", help="ceiling texture name, default white")
+    # parser.add_argument("--ceil-tex", type=str, default="wood", help="ceiling texture name, default white")
+    # Block size controls (MovingBlockWorld): uniform footprint and/or height
+    parser.add_argument("--block-size-xy", type=float, default=None, help="if set, use this x/z size (meters) for all blocks")
+    parser.add_argument("--block-height", type=float, default=None, help="if set, use this height (meters) for all blocks")
 
     # Parallel dataset generation
     parser.add_argument("--dataset-root", type=str, default=None, help="if set, run in parallel dataset generation mode and write outputs under this root")
@@ -612,13 +644,15 @@ def main():
     )
 
     # Policy selection and knobs
-    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "back_and_forth"], help="which control policy to use")
+    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "back_and_forth", "center_rotate"], help="which control policy to use")
     parser.add_argument("--forward-prob", type=float, default=0.8, help="biased_random: probability of moving forward when safe")
     parser.add_argument("--turn-left-weight", type=float, default=1.0, help="biased_random: relative weight for choosing left turns")
     parser.add_argument("--turn-right-weight", type=float, default=1.0, help="biased_random: relative weight for choosing right turns")
     parser.add_argument("--wall-buffer", type=float, default=1.5, help="biased_random: minimum distance from walls before turning away")
     parser.add_argument("--avoid-turning-into-walls", action="store_true", help="biased_random: when turning, prefer direction that increases distance to walls")
     parser.add_argument("--lookahead-mult", type=float, default=2.0, help="biased_random: lookahead distance multiplier relative to max forward step")
+    # Agent spawn option: place agent at the center (uses env support)
+    parser.add_argument("--agent-center-start", action="store_true", help="spawn the agent at the room center (top-left of middle for even sizes)")
 
     args = parser.parse_args()
 
