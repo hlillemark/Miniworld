@@ -23,12 +23,24 @@ command 3pm sep 10
 single generation (static, center rotate):
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlockWorld-v0 \
-  --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
+  --forward-prob 0.90 --wall-buffer 0.0 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 10 \
-  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --cam-fov-y 90
+  --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 7 \
+  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy do_nothing --cam-fov-y 90
+
+
+single generation (dynamic, edge plus agent):
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 300 --out-prefix ./out/edge_plus_run --debug-join --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy edge_plus --observe-steps 20 --cam-fov-y 60
 
 single static generation
 add --blocks-static
@@ -180,6 +192,8 @@ def build_env(args) -> gym.Env:
         env_kwargs["grid_mode"] = True
         env_kwargs["grid_vel_min"] = int(args.grid_vel_min)
         env_kwargs["grid_vel_max"] = int(args.grid_vel_max)
+        if getattr(args, "grid_cardinal_only", False):
+            env_kwargs["grid_cardinal_only"] = True
     if getattr(args, "blocks_static", False):
         env_kwargs["blocks_static"] = True
     if getattr(args, "spawn_wall_buffer", None) is not None:
@@ -365,6 +379,220 @@ class CenterRotatePolicy:
         if r == 1:
             return a.turn_right
         return a.pickup  # id 4 used as NOOP in datasets
+    
+
+class DoNothingPolicy:
+    """
+    action id 4 is used as noop
+    Does nothing, just stands there.
+    """
+
+    def __init__(self, env: gym.Env):
+        self.env = env.unwrapped
+
+    def action(self, step_idx: int) -> int:
+        a = self.env.actions
+        return a.pickup
+
+
+class EdgePlusPolicy:
+    """
+    Cycle between the centers of the four room edges (N, E, S, W).
+    At each edge center, face inward toward the room center and pause for
+    a fixed number of steps by emitting NOOP (dataset action id 4 -> env.pickup).
+
+    Navigation between edges is a simple turn-then-forward controller that
+    moves toward the next edge center, passing through the room center.
+    """
+
+    def __init__(self, env: gym.Env, observe_steps: int = 5):
+        self.env = env.unwrapped
+        self.rng = self.env.np_random
+        self.observe_steps = int(max(0, observe_steps))
+
+        # Room geometry
+        self.cx = float((self.env.min_x + self.env.max_x) * 0.5)
+        self.cz = float((self.env.min_z + self.env.max_z) * 0.5)
+        wall_buf = float(getattr(self.env, "spawn_wall_buffer", 1.0))
+
+        # Edge centers: N (min_z), E (max_x), S (max_z), W (min_x)
+        self.edge_points = [
+            (self.cx, self.env.min_z + wall_buf),
+            (self.env.max_x - wall_buf, self.cz),
+            (self.cx, self.env.max_z - wall_buf),
+            (self.env.min_x + wall_buf, self.cz),
+        ]
+
+        # Controller params
+        turn_step_deg = float(self.env.params.get_max("turn_step"))
+        self.turn_step_rad = turn_step_deg * math.pi / 180.0
+        fwd_step = float(self.env.max_forward_step)
+        self.reach_eps = max(0.05, 0.5 * fwd_step)
+
+        # State machine: always route via center, turns only at center/edge
+        self.current_idx = self._choose_start_edge_index()
+        self.target_idx = None  # chosen randomly when leaving center
+        # align_inward -> observe_edge -> align_to_center -> forward_to_center -> align_to_edge -> forward_to_edge
+        self.phase = "align_inward"
+        self.observe_remaining = self.observe_steps
+
+        # Snap start to the chosen edge center if it's free; keep current heading
+        self._try_snap_to_edge(self.current_idx)
+
+    def _wrap(self, a: float) -> float:
+        return (a + math.pi) % (2 * math.pi) - math.pi
+
+    def _dir_to(self, x: float, z: float) -> float:
+        # Inverse of ahead mapping: dir -> (dx, dz) = (cos(dir), -sin(dir))
+        dx = x - float(self.env.agent.pos[0])
+        dz = z - float(self.env.agent.pos[2])
+        return math.atan2(-dz, dx)
+
+    def _desired_dir_from_delta(self, dx: float, dz: float) -> float:
+        return math.atan2(-dz, dx)
+
+    def _is_pos_free(self, x: float, z: float) -> bool:
+        agent = self.env.agent
+        pos = agent.pos.copy()
+        pos[0] = float(x)
+        pos[2] = float(z)
+        return not bool(self.env.intersect(agent, pos, agent.radius))
+
+    def _set_agent_pose(self, x: float, z: float, dir_rad: float):
+        self.env.agent.pos[0] = float(x)
+        self.env.agent.pos[2] = float(z)
+        self.env.agent.dir = float(self._wrap(dir_rad))
+
+    def _choose_start_edge_index(self) -> int:
+        # Choose nearest edge center to current spawn
+        ax, az = float(self.env.agent.pos[0]), float(self.env.agent.pos[2])
+        dists = []
+        for i, (x, z) in enumerate(self.edge_points):
+            d = (x - ax) ** 2 + (z - az) ** 2
+            dists.append((d, i))
+        dists.sort()
+        return dists[0][1]
+
+    def _try_snap_to_edge(self, idx: int):
+        # Try selected edge; if blocked, try others in order of increasing distance
+        ax, az = float(self.env.agent.pos[0]), float(self.env.agent.pos[2])
+        candidates = []
+        for i, (x, z) in enumerate(self.edge_points):
+            d = (x - ax) ** 2 + (z - az) ** 2
+            candidates.append((d, i, x, z))
+        candidates.sort()
+        for _, i, x, z in candidates:
+            if self._is_pos_free(x, z):
+                # Keep current heading; do not rotate directly
+                self._set_agent_pose(x, z, self.env.agent.dir)
+                self.current_idx = i
+                return
+        # If all blocked, keep current spawn; do nothing
+
+    def _desired_inward_dir(self) -> float:
+        x, z = float(self.env.agent.pos[0]), float(self.env.agent.pos[2])
+        return math.atan2(-(self.cz - z), (self.cx - x))
+
+    def _next_idx(self) -> int:
+        # Visit edges in order N -> E -> S -> W -> ...
+        return (self.current_idx + 1) % 4
+
+    def _choose_next_edge_random(self) -> int:
+        candidates = [0, 1, 2, 3]
+        try:
+            candidates.remove(self.current_idx)
+        except ValueError:
+            pass
+        j = int(self.rng.integers(0, len(candidates)))
+        return int(candidates[j])
+
+    def _turn_toward(self, desired: float) -> Optional[int]:
+        """Single-step heading alignment toward desired; returns turn action or None if aligned."""
+        a = self.env.actions
+        curr = float(self.env.agent.dir)
+        err = abs(self._wrap(desired - curr))
+        if err <= self.turn_step_rad * 0.5:
+            return None
+        left_err = abs(self._wrap(desired - (curr + self.turn_step_rad)))
+        right_err = abs(self._wrap(desired - (curr - self.turn_step_rad)))
+        return a.turn_left if left_err <= right_err else a.turn_right
+
+    def action(self, step_idx: int) -> int:
+        a = self.env.actions
+        agent = self.env.agent
+        ax, az = float(agent.pos[0]), float(agent.pos[2])
+
+        if self.phase == "align_inward":
+            desired = self._desired_inward_dir()
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                return turn
+            self.phase = "observe_edge"
+            return a.pickup
+
+        if self.phase == "observe_edge":
+            if self.observe_remaining > 0:
+                self.observe_remaining -= 1
+                return a.pickup
+            # proceed to center route
+            self.phase = "align_to_center"
+
+        if self.phase == "align_to_center":
+            desired = self._dir_to(self.cx, self.cz)
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                return turn
+            self.phase = "forward_to_center"
+            return a.pickup
+
+        if self.phase == "forward_to_center":
+            dx, dz = (self.cx - ax), (self.cz - az)
+            dist = math.hypot(dx, dz)
+            if dist <= self.reach_eps:
+                # snap to exact center and proceed to align toward next edge
+                self._set_agent_pose(self.cx, self.cz, agent.dir)
+                self.phase = "align_to_edge"
+                return a.pickup
+            # drive straight; if blocked by dynamic obstacle, wait
+            fwd_step = float(self.env.max_forward_step)
+            ahead_x = ax + math.cos(float(agent.dir)) * fwd_step
+            ahead_z = az - math.sin(float(agent.dir)) * fwd_step
+            if self._is_pos_free(ahead_x, ahead_z):
+                return a.move_forward
+            return a.pickup
+
+        if self.phase == "align_to_edge":
+            if self.target_idx is None:
+                self.target_idx = self._choose_next_edge_random()
+            tx, tz = self.edge_points[self.target_idx]
+            desired = self._dir_to(tx, tz)
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                return turn
+            self.phase = "forward_to_edge"
+            return a.pickup
+
+        if self.phase == "forward_to_edge":
+            tx, tz = self.edge_points[self.target_idx]
+            dx, dz = (tx - ax), (tz - az)
+            dist = math.hypot(dx, dz)
+            if dist <= self.reach_eps:
+                # snap to edge, then align inward using discrete turns
+                self._set_agent_pose(tx, tz, agent.dir)
+                self.current_idx = self.target_idx
+                self.target_idx = None  # defer next choice to align_to_edge
+                self.phase = "align_inward"
+                self.observe_remaining = self.observe_steps
+                return a.pickup
+            fwd_step = float(self.env.max_forward_step)
+            ahead_x = ax + math.cos(float(agent.dir)) * fwd_step
+            ahead_z = az - math.sin(float(agent.dir)) * fwd_step
+            if self._is_pos_free(ahead_x, ahead_z):
+                return a.move_forward
+            return a.pickup
+
+        # fallback
+        return a.pickup
 
 
 def _wrap_angle(a: np.ndarray) -> np.ndarray:
@@ -378,6 +606,7 @@ def run_rollout(
     segment_len: int,
     policy_name: str,
     policy_kwargs: dict,
+    observe_steps: int = 5,
     capture_top: bool = False,
 ) -> Tuple[
     np.ndarray,  # rgb
@@ -401,7 +630,20 @@ def run_rollout(
     obs, _ = env.reset()
     if align_heading_zero:
         env.unwrapped.agent.dir = 0.0
-    rgb = env.render()  # render current obs
+
+    # Instantiate policy BEFORE first render so it can adjust spawn pose
+    if policy_name == "back_and_forth":
+        policy = BackAndForthPolicy(segment_len=segment_len)
+    elif policy_name == "center_rotate":
+        policy = CenterRotatePolicy(env=env)
+    elif policy_name == "do_nothing":
+        policy = DoNothingPolicy(env=env)
+    elif policy_name == "edge_plus":
+        policy = EdgePlusPolicy(env=env, observe_steps=observe_steps)
+    else:
+        policy = BiasedRandomPolicy(env=env, **policy_kwargs)
+
+    rgb = env.render()  # render current obs after any policy-driven pose adjust
 
     # Collect first frame
     obs_list.append(rgb)
@@ -422,16 +664,7 @@ def run_rollout(
             "x_offset": float(scale["x_offset"]),
             "z_offset": float(scale["z_offset"]),
         }
-
-    if policy_name == "back_and_forth":
-        policy = BackAndForthPolicy(segment_len=segment_len)
-        act_fn = policy.action
-    elif policy_name == "center_rotate":
-        policy = CenterRotatePolicy(env=env)
-        act_fn = policy.action
-    else:
-        policy = BiasedRandomPolicy(env=env, **policy_kwargs)
-        act_fn = policy.action
+    act_fn = policy.action
     for t in range(steps):
         a = act_fn(t)
         obs, reward, term, trunc, info = env.step(a)
@@ -544,6 +777,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         segment_len=args.segment_len,
         policy_name=args.policy,
         policy_kwargs=policy_kwargs,
+        observe_steps=args.observe_steps,
         capture_top=(args.debug_join or args.output_2d_map),
     )
 
@@ -613,6 +847,7 @@ def main():
     parser.add_argument("--grid-mode", action="store_true")
     parser.add_argument("--grid-vel-min", type=int, default=-1)
     parser.add_argument("--grid-vel-max", type=int, default=1)
+    parser.add_argument("--grid-cardinal-only", action="store_true", help="grid mode: restrict block motion to cardinal directions only")
     parser.add_argument("--debug-join", dest="debug_join", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--output-2d-map", dest="output_2d_map", action="store_true", help="save the top-view map as a separate MP4 named *_map_2d.mp4")
     parser.add_argument("--spawn-wall-buffer", type=float, default=1.0, help="extra buffer from walls when spawning agent and boxes (meters)")
@@ -642,7 +877,7 @@ def main():
     )
 
     # Policy selection and knobs
-    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "back_and_forth", "center_rotate"], help="which control policy to use")
+    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "back_and_forth", "center_rotate", "do_nothing", "edge_plus"], help="which control policy to use")
     parser.add_argument("--forward-prob", type=float, default=0.8, help="biased_random: probability of moving forward when safe")
     parser.add_argument("--turn-left-weight", type=float, default=1.0, help="biased_random: relative weight for choosing left turns")
     parser.add_argument("--turn-right-weight", type=float, default=1.0, help="biased_random: relative weight for choosing right turns")
@@ -651,6 +886,8 @@ def main():
     parser.add_argument("--lookahead-mult", type=float, default=2.0, help="biased_random: lookahead distance multiplier relative to max forward step")
     # Agent spawn option: place agent at the center (uses env support)
     parser.add_argument("--agent-center-start", action="store_true", help="spawn the agent at the room center (top-left of middle for even sizes)")
+    # EdgePlus observation duration
+    parser.add_argument("--observe-steps", type=int, default=5, help="edge_plus: number of NOOP steps to observe at each edge center")
 
     args = parser.parse_args()
 
@@ -678,6 +915,7 @@ def main():
         segment_len=args.segment_len,
         policy_name=args.policy,
         policy_kwargs=policy_kwargs,
+        observe_steps=args.observe_steps,
         capture_top=(args.debug_join or args.output_2d_map),
     )
 

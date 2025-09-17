@@ -44,6 +44,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         grid_mode=False,
         grid_vel_min=-1,
         grid_vel_max=1,
+        grid_cardinal_only=False,
         num_blocks=6,
         allow_color_repeat=False,
         color_pool=None,
@@ -62,6 +63,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         self.spawn_wall_buffer = float(spawn_wall_buffer) if spawn_wall_buffer is not None else None
         self.grid_vel_min = int(grid_vel_min)
         self.grid_vel_max = int(grid_vel_max)
+        self.grid_cardinal_only = bool(grid_cardinal_only)
         self.num_blocks = int(num_blocks)
         self.allow_color_repeat = bool(allow_color_repeat)
         self.color_pool = list(color_pool) if color_pool is not None else list(COLOR_NAMES)
@@ -96,6 +98,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
             self.grid_mode,
             self.grid_vel_min,
             self.grid_vel_max,
+            self.grid_cardinal_only,
             self.num_blocks,
             self.allow_color_repeat,
             self.color_pool,
@@ -260,11 +263,24 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
                 ent.velocity = np.array([0.0, 0.0, 0.0], dtype=float)
                 continue
             if self.grid_mode:
-                while True:
-                    vx = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
-                    vz = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
-                    if vx != 0 or vz != 0:
-                        break
+                if self.grid_cardinal_only:
+                    # Choose one of 4 cardinal directions uniformly
+                    choice = int(self.np_random.integers(0, 4))
+                    speed = max(1, max(abs(self.grid_vel_min), abs(self.grid_vel_max)))
+                    if choice == 0:
+                        vx, vz = speed, 0
+                    elif choice == 1:
+                        vx, vz = -speed, 0
+                    elif choice == 2:
+                        vx, vz = 0, speed
+                    else:
+                        vx, vz = 0, -speed
+                else:
+                    while True:
+                        vx = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
+                        vz = self.np_random.integers(self.grid_vel_min, self.grid_vel_max + 1)
+                        if vx != 0 or vz != 0:
+                            break
                 ent.velocity = np.array([int(vx), 0.0, int(vz)], dtype=float)
             else:
                 theta = self.np_random.uniform(-math.pi, math.pi)
