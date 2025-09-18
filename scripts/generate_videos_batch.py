@@ -62,6 +62,34 @@ python -m scripts.generate_videos_batch \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
   --steps 500 --room-size 10 --no-time-limit --output-2d-map \
   --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy do_nothing --cam-fov-y 60
+  
+
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/edge_plus_training \
+  --num-videos 20000 --block-size 256 --num-processes 64 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --grid-cardinal-only --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 300 --room-size 16 --output-2d-map \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap \
+  --policy edge_plus --observe-steps 5 --cam-fov-y 60
+
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/edge_plus_validation \
+  --num-videos 1000 --block-size 64 --num-processes 64 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --grid-cardinal-only --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 300 --room-size 16 --output-2d-map \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap \
+  --policy edge_plus --observe-steps 5 --cam-fov-y 60
+  
 
 Note the positional "--" separator: all arguments after it are forwarded
 verbatim to scripts.generate_videos (single-run).

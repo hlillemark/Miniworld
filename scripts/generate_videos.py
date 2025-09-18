@@ -40,7 +40,7 @@ python -m scripts.generate_videos \
   --steps 300 --out-prefix ./out/edge_plus_run --debug-join --output-2d-map --room-size 16 \
   --block-size-xy 0.7 --block-height 1.5 \
   --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
-  --policy edge_plus --observe-steps 20 --cam-fov-y 60
+  --policy edge_plus --observe-steps 5 --cam-fov-y 60
 
 single static generation
 add --blocks-static
