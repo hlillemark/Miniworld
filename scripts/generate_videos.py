@@ -196,6 +196,8 @@ def build_env(args) -> gym.Env:
             env_kwargs["grid_cardinal_only"] = True
     if getattr(args, "blocks_static", False):
         env_kwargs["blocks_static"] = True
+    if getattr(args, "block_torus_wrap", False):
+        env_kwargs["block_torus_wrap"] = True
     if getattr(args, "spawn_wall_buffer", None) is not None:
         env_kwargs["spawn_wall_buffer"] = float(args.spawn_wall_buffer)
     # Uniform block sizing controls (MovingBlockWorld)
@@ -844,6 +846,7 @@ def main():
     parser.add_argument("--agent-box-allow-overlap", action="store_true")
     parser.add_argument("--box-random-orientation", action="store_true")
     parser.add_argument("--blocks-static", action="store_true", help="do not move boxes; keep them static")
+    parser.add_argument("--block-torus-wrap", action="store_true", help="blocks wrap across walls (torus); agent unchanged")
     parser.add_argument("--grid-mode", action="store_true")
     parser.add_argument("--grid-vel-min", type=int, default=-1)
     parser.add_argument("--grid-vel-max", type=int, default=1)

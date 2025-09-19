@@ -27,6 +27,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
       per-axis velocities for boxes
     - grid_vel_min / grid_vel_max: integer velocity component range for boxes in
       grid mode (inclusive). (0,0) is avoided
+    - block_torus_wrap: if True, boxes wrap across walls (torus); agent unchanged
     """
 
     def __init__(
@@ -40,6 +41,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         agent_box_allow_overlap=False,
         box_random_orientation=False,
         blocks_static=False,
+        block_torus_wrap=False,
         spawn_wall_buffer=None,
         grid_mode=False,
         grid_vel_min=-1,
@@ -59,6 +61,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         self.agent_box_allow_overlap = bool(agent_box_allow_overlap)
         self.box_random_orientation = bool(box_random_orientation)
         self.blocks_static = bool(blocks_static)
+        self.block_torus_wrap = bool(block_torus_wrap)
         self.grid_mode = bool(grid_mode)
         self.spawn_wall_buffer = float(spawn_wall_buffer) if spawn_wall_buffer is not None else None
         self.grid_vel_min = int(grid_vel_min)
@@ -106,6 +109,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
             self.block_size_xy,
             self.block_height,
             self.agent_center_start,
+            block_torus_wrap=block_torus_wrap,
             **kwargs,
         )
 
@@ -319,6 +323,54 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
 
         return None
 
+    def _intersect_entities_only(self, ent, pos, radius):
+        # Check only entity collisions (ignore walls). Returns colliding entity or None.
+        px, _, pz = pos
+        pos = np.array([px, 0, pz])
+
+        for ent2 in self.entities:
+            if ent2 is ent:
+                continue
+            if self.box_allow_overlap and isinstance(ent, Box) and isinstance(ent2, Box):
+                continue
+            if self.agent_box_allow_overlap and (
+                (ent is self.agent and isinstance(ent2, Box))
+                or (ent2 is self.agent and isinstance(ent, Box))
+            ):
+                continue
+
+            px2, _, pz2 = ent2.pos
+            pos2 = np.array([px2, 0, pz2])
+            d = np.linalg.norm(pos2 - pos)
+            if d < radius + ent2.radius:
+                return ent2
+
+        return None
+
+    def _wrap_coord_inside(self, value: float, radius: float) -> float:
+        """Wrap value onto [radius, size - radius], inclusive of radius and exclusive of (size - radius) upper bound.
+        If the interior width is non-positive, clamp instead.
+        """
+        lo = float(0.0 + radius)
+        hi = float(self.size - radius)
+        interior = hi - lo
+        if interior <= 0.0:
+            # Degenerate case: just clamp
+            return min(max(value, lo), hi)
+        return (value - lo) % interior + lo
+
+    def _wrap_across_axis(self, center_val: float, radius: float) -> float:
+        """Wrap a circle center across 0..size boundaries so it appears on the opposite side
+        strictly inside the room by at least its radius.
+        """
+        if center_val + radius > self.size:
+            new_val = center_val - self.size
+            return max(new_val, radius)
+        if center_val - radius < 0.0:
+            new_val = center_val + self.size
+            return min(new_val, self.size - radius)
+        return center_val
+
     def step(self, action):
         # Avoid PutNext's reward-based termination by calling MiniWorldEnv.step
         if self.grid_mode:
@@ -365,39 +417,86 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
             if ent.velocity[0] != 0.0:
                 candidate = current_pos.copy()
                 candidate[0] += ent.velocity[0]
-                hit = self.intersect(ent, candidate, ent.radius)
-                if (not hit) or (self.box_allow_overlap and isinstance(hit, Box)):
-                    current_pos = candidate
+                if self.block_torus_wrap:
+                    # Unconditionally wrap across boundaries; ignore wall collisions
+                    if (candidate[0] + ent.radius > self.size) or (candidate[0] - ent.radius < 0.0):
+                        wrapped = current_pos.copy()
+                        wrapped[0] = self._wrap_across_axis(candidate[0], ent.radius)
+                        current_pos = wrapped
+                    else:
+                        # Move unless blocked by entity; if blocked, bounce off entity
+                        hit_ent = self._intersect_entities_only(ent, candidate, ent.radius)
+                        if (not hit_ent) or (self.box_allow_overlap and isinstance(hit_ent, Box)):
+                            current_pos = candidate
+                        else:
+                            ent.velocity[0] = -ent.velocity[0]
+                            candidate_bounce = current_pos.copy()
+                            candidate_bounce[0] += ent.velocity[0]
+                            hit_bounce = self._intersect_entities_only(ent, candidate_bounce, ent.radius)
+                            if (not hit_bounce) or (self.box_allow_overlap and isinstance(hit_bounce, Box)):
+                                current_pos = candidate_bounce
                 else:
-                    ent.velocity[0] = -ent.velocity[0]
-                    candidate_bounce = current_pos.copy()
-                    candidate_bounce[0] += ent.velocity[0]
-                    hit_bounce = self.intersect(ent, candidate_bounce, ent.radius)
-                    if (not hit_bounce) or (
-                        self.box_allow_overlap and isinstance(hit_bounce, Box)
-                    ):
-                        current_pos = candidate_bounce
+                    hit = self.intersect(ent, candidate, ent.radius)
+                    if (not hit) or (self.box_allow_overlap and isinstance(hit, Box)):
+                        current_pos = candidate
+                    else:
+                        ent.velocity[0] = -ent.velocity[0]
+                        candidate_bounce = current_pos.copy()
+                        candidate_bounce[0] += ent.velocity[0]
+                        hit_bounce = self.intersect(ent, candidate_bounce, ent.radius)
+                        if (not hit_bounce) or (
+                            self.box_allow_overlap and isinstance(hit_bounce, Box)
+                        ):
+                            current_pos = candidate_bounce
             if self.grid_mode:
-                current_pos[0] = round(current_pos[0])
+                if self.block_torus_wrap:
+                    # Keep blocks off the wall cells when wrapping in grid mode
+                    snapped = round(current_pos[0])
+                    snapped = min(max(snapped, 1.0), float(self.size - 1))
+                    current_pos[0] = snapped
+                else:
+                    current_pos[0] = round(current_pos[0])
 
             # Z axis
             if ent.velocity[2] != 0.0:
                 candidate = current_pos.copy()
                 candidate[2] += ent.velocity[2]
-                hit = self.intersect(ent, candidate, ent.radius)
-                if (not hit) or (self.box_allow_overlap and isinstance(hit, Box)):
-                    current_pos = candidate
+                if self.block_torus_wrap:
+                    if (candidate[2] + ent.radius > self.size) or (candidate[2] - ent.radius < 0.0):
+                        wrapped = current_pos.copy()
+                        wrapped[2] = self._wrap_across_axis(candidate[2], ent.radius)
+                        current_pos = wrapped
+                    else:
+                        hit_ent = self._intersect_entities_only(ent, candidate, ent.radius)
+                        if (not hit_ent) or (self.box_allow_overlap and isinstance(hit_ent, Box)):
+                            current_pos = candidate
+                        else:
+                            ent.velocity[2] = -ent.velocity[2]
+                            candidate_bounce = current_pos.copy()
+                            candidate_bounce[2] += ent.velocity[2]
+                            hit_bounce = self._intersect_entities_only(ent, candidate_bounce, ent.radius)
+                            if (not hit_bounce) or (self.box_allow_overlap and isinstance(hit_bounce, Box)):
+                                current_pos = candidate_bounce
                 else:
-                    ent.velocity[2] = -ent.velocity[2]
-                    candidate_bounce = current_pos.copy()
-                    candidate_bounce[2] += ent.velocity[2]
-                    hit_bounce = self.intersect(ent, candidate_bounce, ent.radius)
-                    if (not hit_bounce) or (
-                        self.box_allow_overlap and isinstance(hit_bounce, Box)
-                    ):
-                        current_pos = candidate_bounce
+                    hit = self.intersect(ent, candidate, ent.radius)
+                    if (not hit) or (self.box_allow_overlap and isinstance(hit, Box)):
+                        current_pos = candidate
+                    else:
+                        ent.velocity[2] = -ent.velocity[2]
+                        candidate_bounce = current_pos.copy()
+                        candidate_bounce[2] += ent.velocity[2]
+                        hit_bounce = self.intersect(ent, candidate_bounce, ent.radius)
+                        if (not hit_bounce) or (
+                            self.box_allow_overlap and isinstance(hit_bounce, Box)
+                        ):
+                            current_pos = candidate_bounce
             if self.grid_mode:
-                current_pos[2] = round(current_pos[2])
+                if self.block_torus_wrap:
+                    snapped = round(current_pos[2])
+                    snapped = min(max(snapped, 1.0), float(self.size - 1))
+                    current_pos[2] = snapped
+                else:
+                    current_pos[2] = round(current_pos[2])
 
             ent.pos = current_pos
 
