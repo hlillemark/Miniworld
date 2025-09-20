@@ -31,7 +31,7 @@ python -m scripts.generate_videos \
   --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy do_nothing --cam-fov-y 90
 
 
-single generation (dynamic, edge plus agent):
+single generation (dynamic, edge plus agent): (edge plus)
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlockWorld-v0 \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
@@ -41,6 +41,18 @@ python -m scripts.generate_videos \
   --block-size-xy 0.7 --block-height 1.5 \
   --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
   --policy edge_plus --observe-steps 5 --cam-fov-y 60
+  
+  
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 500 --out-prefix ./out/biased_random_fwd --debug-join --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy biased_random --forward-prob 0.85 --cam-fov-y 60
+
 
 single static generation
 add --blocks-static
@@ -293,6 +305,12 @@ class BiasedRandomPolicy:
         self.wall_buffer = float(wall_buffer)
         self.avoid_turning_into_walls = bool(avoid_turning_into_walls)
         self.lookahead_mult = float(lookahead_mult)
+        # Stuck mitigation state
+        self._last_pos = None
+        self._prev_action = None
+        self._turn_streak = 0
+        self._prefer_forward_next = False  # after a turn, attempt one forward if safe
+        self._last_turn_dir = 0  # +1 for left, -1 for right, 0 none
 
     def _dist_to_walls(self, pos: np.ndarray) -> float:
         x, _, z = pos
@@ -318,10 +336,31 @@ class BiasedRandomPolicy:
         lookahead = fwd_step * self.lookahead_mult
         curr_dist = self._dist_to_walls(agent.pos)
 
+        # Track whether we moved since last step; increment turn streak if we keep turning in place
+        if self._last_pos is None:
+            self._last_pos = agent.pos.copy()
+        moved = float(np.linalg.norm(agent.pos[[(0, 2)]] - self._last_pos[[(0, 2)]])) > 1e-6
+        if moved or self._prev_action == a.move_forward:
+            self._turn_streak = 0
+        elif self._prev_action in (a.turn_left, a.turn_right):
+            self._turn_streak += 1
+
         # Forward candidate (one step)
         next_pos = self._ahead_pos(agent.pos, agent.dir, fwd_step)
         forward_collides = bool(self.env.intersect(agent, next_pos, agent.radius))
-        need_turn = curr_dist < self.wall_buffer or forward_collides
+        # Consider how moving forward changes distance to walls
+        next_dist = self._dist_to_walls(next_pos)
+        increases_clearance = next_dist > curr_dist + 1e-6
+        decreases_clearance = next_dist < curr_dist - 1e-6
+        # Need to turn if forward collides OR moving forward would further reduce clearance when already too close
+        need_turn = forward_collides or (curr_dist < self.wall_buffer and decreases_clearance)
+
+        # Prefer taking a forward step immediately after a turn if it's safe to do so
+        if self._prefer_forward_next and not forward_collides:
+            self._prefer_forward_next = False
+            self._prev_action = a.move_forward
+            self._last_pos = agent.pos.copy()
+            return a.move_forward
 
         def turn_dir_score(turn_sign: int) -> float:
             # turn_sign: +1 left, -1 right
@@ -335,14 +374,29 @@ class BiasedRandomPolicy:
             left_score = turn_dir_score(+1)
             right_score = turn_dir_score(-1)
             if left_score == right_score:
-                # Tie-break using weights
-                probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
-                probs = probs / probs.sum()
-                return a.turn_left if self.rng.random() < probs[0] else a.turn_right
-            return a.turn_left if left_score > right_score else a.turn_right
+                # Tie-break using last turn direction if available; else weights
+                if self._last_turn_dir != 0:
+                    action = a.turn_left if self._last_turn_dir > 0 else a.turn_right
+                else:
+                    probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
+                    probs = probs / probs.sum()
+                    action = a.turn_left if self.rng.random() < probs[0] else a.turn_right
+            else:
+                action = a.turn_left if left_score > right_score else a.turn_right
+            # Stuck mitigation: if we've been turning repeatedly without moving, try to force a forward step when safe
+            if (self._turn_streak >= 6) and (not forward_collides) and increases_clearance:
+                action = a.move_forward
+            self._prev_action = action
+            self._last_pos = agent.pos.copy()
+            self._prefer_forward_next = True
+            self._last_turn_dir = (+1 if action == a.turn_left else (-1 if action == a.turn_right else 0))
+            return action
 
         # Otherwise, biased random: mostly forward if safe
-        if (not forward_collides) and (self.rng.random() < self.forward_prob):
+        if (not forward_collides) and (self.rng.random() < self.forward_prob or self._turn_streak >= 6 or increases_clearance or not decreases_clearance):
+            self._prev_action = a.move_forward
+            self._last_pos = agent.pos.copy()
+            self._last_turn_dir = 0
             return a.move_forward
 
         # Choose turn based on weights, but optionally avoid turning into walls
@@ -350,14 +404,39 @@ class BiasedRandomPolicy:
             left_score = turn_dir_score(+1)
             right_score = turn_dir_score(-1)
             if left_score == right_score:
-                probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
-                probs = probs / probs.sum()
-                return a.turn_left if self.rng.random() < probs[0] else a.turn_right
-            return a.turn_left if left_score > right_score else a.turn_right
+                if self._last_turn_dir != 0:
+                    action = a.turn_left if self._last_turn_dir > 0 else a.turn_right
+                else:
+                    probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
+                    probs = probs / probs.sum()
+                    action = a.turn_left if self.rng.random() < probs[0] else a.turn_right
+            else:
+                action = a.turn_left if left_score > right_score else a.turn_right
+            # Stuck mitigation
+            if (self._turn_streak >= 6) and (not forward_collides) and increases_clearance:
+                action = a.move_forward
+            self._prev_action = action
+            self._last_pos = agent.pos.copy()
+            self._prefer_forward_next = True
+            self._last_turn_dir = (+1 if action == a.turn_left else (-1 if action == a.turn_right else 0))
+            return action
 
         probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
         probs = probs / probs.sum()
-        return a.turn_left if self.rng.random() < probs[0] else a.turn_right
+        if self._last_turn_dir != 0:
+            action = a.turn_left if self._last_turn_dir > 0 else a.turn_right
+        else:
+            action = a.turn_left if self.rng.random() < probs[0] else a.turn_right
+        if (self._turn_streak >= 6) and (not forward_collides) and increases_clearance:
+            action = a.move_forward
+        self._prev_action = action
+        self._last_pos = agent.pos.copy()
+        if action in (a.turn_left, a.turn_right):
+            self._prefer_forward_next = True
+            self._last_turn_dir = (+1 if action == a.turn_left else -1)
+        else:
+            self._last_turn_dir = 0
+        return action
 
 
 class CenterRotatePolicy:
@@ -597,6 +676,236 @@ class EdgePlusPolicy:
         return a.pickup
 
 
+class BiasedWalkV2Policy:
+    """
+    Three-phase wall-biased exploration that cycles:
+      0) On spawn, walk straight until hitting a wall
+      1) "look": turn to face the room center and pause for observe_steps (NOOP)
+      2) "wall crawl": pick left or right along the wall, move forward with probability forward_prob; when we decide to turn, align inward toward the room and transition to (3)
+      3) "walk in room": move forward with probability forward_prob; when we decide to turn, make a discrete turn and then walk straight until we hit the wall; on wall impact, turn around and return to (1)
+
+    Notes:
+      - Uses env.max_forward_step and env.params.turn_step for discrete motions
+      - NOOP is implemented as env.pickup action id
+    """
+
+    def __init__(self, env: gym.Env, forward_prob: float = 0.8, observe_steps: int = 5):
+        self.env = env.unwrapped
+        self.rng = self.env.np_random
+        self.forward_prob = float(forward_prob)
+        self.observe_steps = int(max(0, observe_steps))
+
+        # Room center
+        self.cx = float((self.env.min_x + self.env.max_x) * 0.5)
+        self.cz = float((self.env.min_z + self.env.max_z) * 0.5)
+
+        # Discrete turn step in radians
+        turn_step_deg = float(self.env.params.get_max("turn_step"))
+        self.turn_step_rad = turn_step_deg * math.pi / 180.0
+
+        # State machine
+        self.phase = "spawn_to_wall"
+        self.look_remaining = self.observe_steps
+        self.crawl_sign = 0  # +1 for left, -1 for right
+        self.target_dir = None
+        # Stuck mitigation state
+        self._last_pos = None
+        self._prev_action = None
+        self._turn_streak = 0
+        self._prefer_forward_next = False
+
+    def _wrap(self, a: float) -> float:
+        return (a + math.pi) % (2 * math.pi) - math.pi
+
+    def _dir_to(self, x: float, z: float) -> float:
+        ax = float(self.env.agent.pos[0])
+        az = float(self.env.agent.pos[2])
+        dx = x - ax
+        dz = z - az
+        return math.atan2(-dz, dx)
+
+    def _ahead_pos(self, pos: np.ndarray, dir_rad: float, dist: float) -> np.ndarray:
+        dx = math.cos(dir_rad) * dist
+        dz = -math.sin(dir_rad) * dist
+        nxt = pos.copy()
+        nxt[0] += dx
+        nxt[2] += dz
+        return nxt
+
+    def _forward_blocked(self) -> bool:
+        agent = self.env.agent
+        fwd_step = float(self.env.max_forward_step)
+        next_pos = self._ahead_pos(agent.pos, float(agent.dir), fwd_step)
+        return bool(self.env.intersect(agent, next_pos, agent.radius))
+
+    def _turn_toward(self, desired: float) -> Optional[int]:
+        a = self.env.actions
+        curr = float(self.env.agent.dir)
+        err = abs(self._wrap(desired - curr))
+        if err <= self.turn_step_rad * 0.5:
+            return None
+        # choose left/right turn that reduces error
+        left_err = abs(self._wrap(desired - (curr + self.turn_step_rad)))
+        right_err = abs(self._wrap(desired - (curr - self.turn_step_rad)))
+        return a.turn_left if left_err <= right_err else a.turn_right
+
+    def action(self, step_idx: int) -> int:
+        a = self.env.actions
+        agent = self.env.agent
+
+        # Track movement and turning streak
+        if self._last_pos is None:
+            self._last_pos = agent.pos.copy()
+        moved = float(np.linalg.norm(agent.pos[[(0, 2)]] - self._last_pos[[(0, 2)]])) > 1e-6
+        if moved or self._prev_action == a.move_forward:
+            self._turn_streak = 0
+        elif self._prev_action in (a.turn_left, a.turn_right):
+            self._turn_streak += 1
+
+        def _emit(action_id: int) -> int:
+            self._prev_action = action_id
+            self._last_pos = agent.pos.copy()
+            if action_id in (a.turn_left, a.turn_right):
+                self._prefer_forward_next = True
+            return action_id
+
+        # 0) Spawn: go straight until we hit a wall
+        if self.phase == "spawn_to_wall":
+            if not self._forward_blocked():
+                return _emit(a.move_forward)
+            # transition to look
+            self.phase = "look_align"
+            self.look_remaining = self.observe_steps
+            return _emit(a.pickup)
+
+        # 1) Look: face the center and pause
+        if self.phase == "look_align":
+            desired = self._dir_to(self.cx, self.cz)
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            self.phase = "look_observe"
+            self.look_remaining = self.observe_steps
+            return _emit(a.pickup)
+
+        if self.phase == "look_observe":
+            if self.look_remaining > 0:
+                self.look_remaining -= 1
+                return _emit(a.pickup)
+            # choose crawl side and align along wall (left/right relative to inward)
+            self.crawl_sign = +1 if float(self.rng.random()) < 0.5 else -1
+            self.phase = "wall_crawl_align"
+            return _emit(a.pickup)
+
+        # 2) Wall crawl
+        if self.phase == "wall_crawl_align":
+            center_dir = self._dir_to(self.cx, self.cz)
+            desired = self._wrap(center_dir + (self.crawl_sign * (math.pi / 2.0)))
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            self.phase = "wall_crawl_move"
+            return _emit(a.pickup)
+
+        if self.phase == "wall_crawl_move":
+            # Continue forward with forward_prob; otherwise start turning inward to walk into room
+            if self._prefer_forward_next and not self._forward_blocked():
+                self._prefer_forward_next = False
+                return _emit(a.move_forward)
+            if float(self.rng.random()) < self.forward_prob:
+                if not self._forward_blocked():
+                    return _emit(a.move_forward)
+                # corner: turn to keep hugging wall (left-hand rule: turn right; right-hand: turn left)
+                turn = a.turn_right if self.crawl_sign > 0 else a.turn_left
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            # decide to turn inward
+            center_dir = self._dir_to(self.cx, self.cz)
+            self.target_dir = center_dir
+            self.phase = "walk_room_align"
+            turn = self._turn_toward(self.target_dir)
+            if turn is not None:
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            # already aligned
+            self.phase = "walk_room_move"
+            return _emit(a.pickup)
+
+        # 3) Walk in room
+        if self.phase == "walk_room_align":
+            turn = self._turn_toward(self.target_dir)
+            if turn is not None:
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            self.phase = "walk_room_move"
+            return _emit(a.pickup)
+
+        if self.phase == "walk_room_move":
+            if self._prefer_forward_next and not self._forward_blocked():
+                self._prefer_forward_next = False
+                return _emit(a.move_forward)
+            if float(self.rng.random()) < self.forward_prob:
+                if not self._forward_blocked():
+                    return _emit(a.move_forward)
+                # unexpected blockage inside room: fall back to go-to-wall behavior
+            # commit to a discrete turn and then go straight to the wall
+            turn_sign = +1 if float(self.rng.random()) < 0.5 else -1
+            curr_dir = float(agent.dir)
+            self.target_dir = self._wrap(curr_dir + turn_sign * self.turn_step_rad)
+            self.phase = "go_to_wall_align"
+            turn = self._turn_toward(self.target_dir)
+            if turn is not None:
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            self.phase = "go_to_wall_move"
+            return _emit(a.pickup)
+
+        if self.phase == "go_to_wall_align":
+            turn = self._turn_toward(self.target_dir)
+            if turn is not None:
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            self.phase = "go_to_wall_move"
+            return _emit(a.pickup)
+
+        if self.phase == "go_to_wall_move":
+            if not self._forward_blocked():
+                return _emit(a.move_forward)
+            # Hit wall: turn around, then go to look phase
+            self.target_dir = self._wrap(float(agent.dir) + math.pi)
+            self.phase = "turn_around_align"
+            turn = self._turn_toward(self.target_dir)
+            if turn is not None:
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            # already turned around
+            self.phase = "look_align"
+            self.look_remaining = self.observe_steps
+            return _emit(a.pickup)
+
+        if self.phase == "turn_around_align":
+            turn = self._turn_toward(self.target_dir)
+            if turn is not None:
+                if self._turn_streak >= 6 and not self._forward_blocked():
+                    return _emit(a.move_forward)
+                return _emit(turn)
+            self.phase = "look_align"
+            self.look_remaining = self.observe_steps
+            return _emit(a.pickup)
+
+        # fallback: NOOP
+        return _emit(a.pickup)
+
 def _wrap_angle(a: np.ndarray) -> np.ndarray:
     return (a + np.pi) % (2 * np.pi) - np.pi
 
@@ -642,6 +951,8 @@ def run_rollout(
         policy = DoNothingPolicy(env=env)
     elif policy_name == "edge_plus":
         policy = EdgePlusPolicy(env=env, observe_steps=observe_steps)
+    elif policy_name == "biased_walk_v2":
+        policy = BiasedWalkV2Policy(env=env, forward_prob=policy_kwargs.get("forward_prob", 0.8), observe_steps=observe_steps)
     else:
         policy = BiasedRandomPolicy(env=env, **policy_kwargs)
 
@@ -880,7 +1191,7 @@ def main():
     )
 
     # Policy selection and knobs
-    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "back_and_forth", "center_rotate", "do_nothing", "edge_plus"], help="which control policy to use")
+    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "biased_walk_v2", "back_and_forth", "center_rotate", "do_nothing", "edge_plus"], help="which control policy to use")
     parser.add_argument("--forward-prob", type=float, default=0.8, help="biased_random: probability of moving forward when safe")
     parser.add_argument("--turn-left-weight", type=float, default=1.0, help="biased_random: relative weight for choosing left turns")
     parser.add_argument("--turn-right-weight", type=float, default=1.0, help="biased_random: relative weight for choosing right turns")
