@@ -51,7 +51,7 @@ python -m scripts.generate_videos \
   --steps 500 --out-prefix ./out/biased_random_fwd --debug-join --output-2d-map --room-size 16 \
   --block-size-xy 0.7 --block-height 1.5 \
   --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
-  --policy biased_random --forward-prob 0.85 --cam-fov-y 60
+  --policy biased_random --forward-prob 0.9 --cam-fov-y 60
 
 
 single static generation
@@ -334,33 +334,10 @@ class BiasedRandomPolicy:
         agent = self.env.agent
         fwd_step = float(self.env.max_forward_step)
         lookahead = fwd_step * self.lookahead_mult
-        curr_dist = self._dist_to_walls(agent.pos)
-
-        # Track whether we moved since last step; increment turn streak if we keep turning in place
-        if self._last_pos is None:
-            self._last_pos = agent.pos.copy()
-        moved = float(np.linalg.norm(agent.pos[[(0, 2)]] - self._last_pos[[(0, 2)]])) > 1e-6
-        if moved or self._prev_action == a.move_forward:
-            self._turn_streak = 0
-        elif self._prev_action in (a.turn_left, a.turn_right):
-            self._turn_streak += 1
 
         # Forward candidate (one step)
         next_pos = self._ahead_pos(agent.pos, agent.dir, fwd_step)
         forward_collides = bool(self.env.intersect(agent, next_pos, agent.radius))
-        # Consider how moving forward changes distance to walls
-        next_dist = self._dist_to_walls(next_pos)
-        increases_clearance = next_dist > curr_dist + 1e-6
-        decreases_clearance = next_dist < curr_dist - 1e-6
-        # Need to turn if forward collides OR moving forward would further reduce clearance when already too close
-        need_turn = forward_collides or (curr_dist < self.wall_buffer and decreases_clearance)
-
-        # Prefer taking a forward step immediately after a turn if it's safe to do so
-        if self._prefer_forward_next and not forward_collides:
-            self._prefer_forward_next = False
-            self._prev_action = a.move_forward
-            self._last_pos = agent.pos.copy()
-            return a.move_forward
 
         def turn_dir_score(turn_sign: int) -> float:
             # turn_sign: +1 left, -1 right
@@ -370,73 +347,29 @@ class BiasedRandomPolicy:
             ahead2 = self._ahead_pos(agent.pos, new_dir, lookahead)
             return self._dist_to_walls(ahead2)
 
-        if need_turn:
+        # If forward would collide, choose a turn (prefer direction with more clearance)
+        if forward_collides:
             left_score = turn_dir_score(+1)
             right_score = turn_dir_score(-1)
-            if left_score == right_score:
-                # Tie-break using last turn direction if available; else weights
-                if self._last_turn_dir != 0:
-                    action = a.turn_left if self._last_turn_dir > 0 else a.turn_right
-                else:
-                    probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
-                    probs = probs / probs.sum()
-                    action = a.turn_left if self.rng.random() < probs[0] else a.turn_right
-            else:
-                action = a.turn_left if left_score > right_score else a.turn_right
-            # Stuck mitigation: if we've been turning repeatedly without moving, try to force a forward step when safe
-            if (self._turn_streak >= 6) and (not forward_collides) and increases_clearance:
-                action = a.move_forward
-            self._prev_action = action
-            self._last_pos = agent.pos.copy()
-            self._prefer_forward_next = True
-            self._last_turn_dir = (+1 if action == a.turn_left else (-1 if action == a.turn_right else 0))
-            return action
+            if self.avoid_turning_into_walls and (left_score != right_score):
+                return a.turn_left if left_score > right_score else a.turn_right
+            probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
+            probs = probs / probs.sum()
+            return a.turn_left if self.rng.random() < probs[0] else a.turn_right
 
-        # Otherwise, biased random: mostly forward if safe
-        if (not forward_collides) and (self.rng.random() < self.forward_prob or self._turn_streak >= 6 or increases_clearance or not decreases_clearance):
-            self._prev_action = a.move_forward
-            self._last_pos = agent.pos.copy()
-            self._last_turn_dir = 0
+        # Otherwise: move forward with probability, else turn (optionally away from walls)
+        if self.rng.random() < self.forward_prob:
             return a.move_forward
 
-        # Choose turn based on weights, but optionally avoid turning into walls
         if self.avoid_turning_into_walls:
             left_score = turn_dir_score(+1)
             right_score = turn_dir_score(-1)
-            if left_score == right_score:
-                if self._last_turn_dir != 0:
-                    action = a.turn_left if self._last_turn_dir > 0 else a.turn_right
-                else:
-                    probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
-                    probs = probs / probs.sum()
-                    action = a.turn_left if self.rng.random() < probs[0] else a.turn_right
-            else:
-                action = a.turn_left if left_score > right_score else a.turn_right
-            # Stuck mitigation
-            if (self._turn_streak >= 6) and (not forward_collides) and increases_clearance:
-                action = a.move_forward
-            self._prev_action = action
-            self._last_pos = agent.pos.copy()
-            self._prefer_forward_next = True
-            self._last_turn_dir = (+1 if action == a.turn_left else (-1 if action == a.turn_right else 0))
-            return action
+            if left_score != right_score:
+                return a.turn_left if left_score > right_score else a.turn_right
 
         probs = np.array([self.turn_left_weight, self.turn_right_weight], dtype=float)
         probs = probs / probs.sum()
-        if self._last_turn_dir != 0:
-            action = a.turn_left if self._last_turn_dir > 0 else a.turn_right
-        else:
-            action = a.turn_left if self.rng.random() < probs[0] else a.turn_right
-        if (self._turn_streak >= 6) and (not forward_collides) and increases_clearance:
-            action = a.move_forward
-        self._prev_action = action
-        self._last_pos = agent.pos.copy()
-        if action in (a.turn_left, a.turn_right):
-            self._prefer_forward_next = True
-            self._last_turn_dir = (+1 if action == a.turn_left else -1)
-        else:
-            self._last_turn_dir = 0
-        return action
+        return a.turn_left if self.rng.random() < probs[0] else a.turn_right
 
 
 class CenterRotatePolicy:
