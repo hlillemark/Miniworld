@@ -133,12 +133,12 @@ python -m scripts.generate_videos_batch \
 python -m scripts.generate_videos_batch \
   --env-name MiniWorld-MovingBlockWorld-v0 \
   --dataset-root /data/hansen/projects/wm-memory/data/blockworld/randwalk_og_updated_validation \
-  --num-videos 1000 --block-size 64 --num-processes 32 \
+  --num-videos 1000 --block-size 64 --num-processes 64 \
   -- \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --out-prefix ./out/biased_random_fwd --debug-join --output-2d-map --room-size 16 \
+  --steps 500 --output-2d-map --room-size 16 \
   --block-size-xy 0.7 --block-height 1.5 \
   --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
   --policy biased_random --forward-prob 0.9 --cam-fov-y 60
@@ -172,6 +172,37 @@ python -m scripts.generate_videos_batch \
   --agent-box-allow-overlap --box-allow-overlap \
   --policy edge_plus --observe-steps 5 --cam-fov-y 60 \
   --block-torus-wrap
+  
+
+# Peekaboo debug
+
+
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/peekaboo_training \
+  --num-videos 2000 --block-size 256 --num-processes 32 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy peeakboo --observe-steps 70 --cam-fov-y 60
+
+
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/peekaboo_validation \
+  --num-videos 250 --block-size 64 --num-processes 32 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy peeakboo --observe-steps 70 --cam-fov-y 60
   
 
 Note the positional "--" separator: all arguments after it are forwarded

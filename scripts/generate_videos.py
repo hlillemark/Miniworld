@@ -609,6 +609,128 @@ class EdgePlusPolicy:
         return a.pickup
 
 
+class PeeakbooPolicy:
+    """
+    Stationary: spawn at the midpoint of a random wall, then alternate:
+      - align inward to room, NOOP for observe_steps
+      - align outward toward the wall, NOOP for observe_steps
+    Repeats indefinitely; emits only NOOP except for discrete turns to align.
+    """
+
+    def __init__(self, env: gym.Env, observe_steps: int = 70):
+        self.env = env.unwrapped
+        self.rng = self.env.np_random
+        self.observe_steps = int(max(0, observe_steps))
+
+        # Room geometry
+        self.cx = float((self.env.min_x + self.env.max_x) * 0.5)
+        self.cz = float((self.env.min_z + self.env.max_z) * 0.5)
+        wall_buf = float(getattr(self.env, "spawn_wall_buffer", 1.0))
+
+        # Wall midpoints (N, E, S, W)
+        self.wall_points = [
+            (self.cx, self.env.min_z + wall_buf),
+            (self.env.max_x - wall_buf, self.cz),
+            (self.cx, self.env.max_z - wall_buf),
+            (self.env.min_x + wall_buf, self.cz),
+        ]
+
+        # Controller params
+        turn_step_deg = float(self.env.params.get_max("turn_step"))
+        self.turn_step_rad = turn_step_deg * math.pi / 180.0
+
+        # Choose a wall midpoint that is free, preferring nearest to current
+        self._try_snap_to_random_wall()
+        # Start aligned inward
+        self.phase = "align_inward"
+        self.observe_remaining = self.observe_steps
+
+    def _wrap(self, a: float) -> float:
+        return (a + math.pi) % (2 * math.pi) - math.pi
+
+    def _dir_to(self, x: float, z: float) -> float:
+        ax = float(self.env.agent.pos[0])
+        az = float(self.env.agent.pos[2])
+        dx = x - ax
+        dz = z - az
+        return math.atan2(-dz, dx)
+
+    def _is_pos_free(self, x: float, z: float) -> bool:
+        agent = self.env.agent
+        pos = agent.pos.copy()
+        pos[0] = float(x)
+        pos[2] = float(z)
+        return not bool(self.env.intersect(agent, pos, agent.radius))
+
+    def _set_agent_pose(self, x: float, z: float, dir_rad: float):
+        self.env.agent.pos[0] = float(x)
+        self.env.agent.pos[2] = float(z)
+        self.env.agent.dir = float(self._wrap(dir_rad))
+
+    def _try_snap_to_random_wall(self):
+        # order by distance to current, then pick the first free; if none free, keep current
+        ax, az = float(self.env.agent.pos[0]), float(self.env.agent.pos[2])
+        candidates = []
+        for i, (x, z) in enumerate(self.wall_points):
+            d = (x - ax) ** 2 + (z - az) ** 2
+            candidates.append((d, i, x, z))
+        candidates.sort()
+        # optionally shuffle among equal distances using RNG
+        for _, _, x, z in candidates:
+            if self._is_pos_free(x, z):
+                # keep current heading; alignment handled by phases
+                self._set_agent_pose(x, z, self.env.agent.dir)
+                return
+        # otherwise, do nothing
+
+    def _turn_toward(self, desired: float) -> Optional[int]:
+        a = self.env.actions
+        curr = float(self.env.agent.dir)
+        err = abs(self._wrap(desired - curr))
+        if err <= self.turn_step_rad * 0.5:
+            return None
+        left_err = abs(self._wrap(desired - (curr + self.turn_step_rad)))
+        right_err = abs(self._wrap(desired - (curr - self.turn_step_rad)))
+        return a.turn_left if left_err <= right_err else a.turn_right
+
+    def action(self, step_idx: int) -> int:
+        a = self.env.actions
+        # inward is toward center; outward is 180 degrees opposite
+        inward_dir = self._dir_to(self.cx, self.cz)
+        outward_dir = self._wrap(inward_dir + math.pi)
+
+        if self.phase == "align_inward":
+            turn = self._turn_toward(inward_dir)
+            if turn is not None:
+                return turn
+            self.phase = "observe_inward"
+            self.observe_remaining = self.observe_steps
+            return a.pickup
+
+        if self.phase == "observe_inward":
+            if self.observe_remaining > 0:
+                self.observe_remaining -= 1
+                return a.pickup
+            self.phase = "align_outward"
+            return a.pickup
+
+        if self.phase == "align_outward":
+            turn = self._turn_toward(outward_dir)
+            if turn is not None:
+                return turn
+            self.phase = "observe_outward"
+            self.observe_remaining = self.observe_steps
+            return a.pickup
+
+        if self.phase == "observe_outward":
+            if self.observe_remaining > 0:
+                self.observe_remaining -= 1
+                return a.pickup
+            self.phase = "align_inward"
+            return a.pickup
+
+        return a.pickup
+
 class BiasedWalkV2Policy:
     """
     Three-phase wall-biased exploration that cycles:
@@ -886,6 +1008,8 @@ def run_rollout(
         policy = EdgePlusPolicy(env=env, observe_steps=observe_steps)
     elif policy_name == "biased_walk_v2":
         policy = BiasedWalkV2Policy(env=env, forward_prob=policy_kwargs.get("forward_prob", 0.8), observe_steps=observe_steps)
+    elif policy_name == "peeakboo":
+        policy = PeeakbooPolicy(env=env, observe_steps=observe_steps)
     else:
         policy = BiasedRandomPolicy(env=env, **policy_kwargs)
 
@@ -1124,7 +1248,7 @@ def main():
     )
 
     # Policy selection and knobs
-    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "biased_walk_v2", "back_and_forth", "center_rotate", "do_nothing", "edge_plus"], help="which control policy to use")
+    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "biased_walk_v2", "back_and_forth", "center_rotate", "do_nothing", "edge_plus", "peeakboo"], help="which control policy to use")
     parser.add_argument("--forward-prob", type=float, default=0.8, help="biased_random: probability of moving forward when safe")
     parser.add_argument("--turn-left-weight", type=float, default=1.0, help="biased_random: relative weight for choosing left turns")
     parser.add_argument("--turn-right-weight", type=float, default=1.0, help="biased_random: relative weight for choosing right turns")
