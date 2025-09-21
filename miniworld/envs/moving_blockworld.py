@@ -50,6 +50,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         num_blocks=6,
         allow_color_repeat=False,
         color_pool=None,
+        ensure_base_palette=False,
         near_margin=None,
         block_size_xy=None,
         block_height=None,
@@ -70,6 +71,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         self.num_blocks = int(num_blocks)
         self.allow_color_repeat = bool(allow_color_repeat)
         self.color_pool = list(color_pool) if color_pool is not None else list(COLOR_NAMES)
+        self.ensure_base_palette = bool(ensure_base_palette)
         # Optional uniform block sizing controls
         # If provided, all blocks will use (block_size_xy, block_height, block_size_xy)
         self.block_size_xy = None if block_size_xy is None else float(block_size_xy)
@@ -127,10 +129,23 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         self.add_rect_room(min_x=0, max_x=self.size, min_z=0, max_z=self.size, **room_kwargs)
 
         # Choose colors for the blocks
-        if not self.allow_color_repeat and self.num_blocks <= len(self.color_pool):
-            chosen_colors = list(self.np_random.choice(self.color_pool, size=self.num_blocks, replace=False))
+        if self.ensure_base_palette and self.num_blocks > 0:
+            base_palette = ["green", "red", "yellow", "blue", "purple", "gray"]
+            # Filter base colors to those present in the pool
+            base_palette = [c for c in base_palette if c in self.color_pool]
+            k = min(self.num_blocks, len(base_palette))
+            # Ensure at least one of each (up to k)
+            chosen_colors = list(self.np_random.choice(base_palette, size=k, replace=False))
+            # Fill the remainder randomly from the full pool (with replacement)
+            rem = self.num_blocks - k
+            if rem > 0:
+                extra = list(self.np_random.choice(self.color_pool, size=rem, replace=True))
+                chosen_colors.extend(extra)
         else:
-            chosen_colors = list(self.np_random.choice(self.color_pool, size=self.num_blocks, replace=True))
+            if not self.allow_color_repeat and self.num_blocks <= len(self.color_pool):
+                chosen_colors = list(self.np_random.choice(self.color_pool, size=self.num_blocks, replace=False))
+            else:
+                chosen_colors = list(self.np_random.choice(self.color_pool, size=self.num_blocks, replace=True))
 
         # Helper to compute room extents with optional spawn buffer
         def _spawn_extents(ent_radius: float):

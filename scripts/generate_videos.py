@@ -54,6 +54,27 @@ python -m scripts.generate_videos \
   --policy biased_random --forward-prob 0.9 --cam-fov-y 60
 
 
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 500 --out-prefix ./out/biased_walk_v2 --debug-join --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy biased_walk_v2 --forward-prob 0.9 --cam-fov-y 60 --forward-prob 0.9
+  
+peekaboo w motion
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 500 --out-prefix ./out/peekaboo_motion --debug-join --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy peekaboo_motion --observe-inward-steps 7 --observe-outward-steps 28 --cam-fov-y 60
+
 single static generation
 add --blocks-static
   
@@ -206,6 +227,15 @@ def build_env(args) -> gym.Env:
         env_kwargs["grid_vel_max"] = int(args.grid_vel_max)
         if getattr(args, "grid_cardinal_only", False):
             env_kwargs["grid_cardinal_only"] = True
+    # Block count stochasticity and color palette controls (MovingBlockWorld)
+    if getattr(args, "num_blocks", None) is not None:
+        env_kwargs["num_blocks"] = int(args.num_blocks)
+    if getattr(args, "num_blocks_min", None) is not None and getattr(args, "num_blocks_max", None) is not None:
+        # Defer sampling to env.reset by passing a random value each build
+        import random as _py_random
+        env_kwargs["num_blocks"] = int(_py_random.randint(int(args.num_blocks_min), int(args.num_blocks_max)))
+    if getattr(args, "ensure_base_palette", False):
+        env_kwargs["ensure_base_palette"] = True
     if getattr(args, "blocks_static", False):
         env_kwargs["blocks_static"] = True
     if getattr(args, "block_torus_wrap", False):
@@ -609,6 +639,204 @@ class EdgePlusPolicy:
         return a.pickup
 
 
+class PeekabooMotionPolicy:
+    """
+    Edge-visiting controller like EdgePlus, but at each edge:
+      - Align inward, observe for observe_inward_steps
+      - Align outward (toward wall), observe for observe_outward_steps
+      - Align to center, move to center; align to next edge, move to edge; repeat
+    """
+
+    def __init__(self, env: gym.Env, observe_inward_steps: int = 5, observe_outward_steps: int = 20):
+        self.env = env.unwrapped
+        self.rng = self.env.np_random
+        self.observe_inward_steps = int(max(0, observe_inward_steps))
+        self.observe_outward_steps = int(max(0, observe_outward_steps))
+
+        # Room geometry
+        self.cx = float((self.env.min_x + self.env.max_x) * 0.5)
+        self.cz = float((self.env.min_z + self.env.max_z) * 0.5)
+        wall_buf = float(getattr(self.env, "spawn_wall_buffer", 1.0))
+
+        # Edge centers: N (min_z), E (max_x), S (max_z), W (min_x)
+        self.edge_points = [
+            (self.cx, self.env.min_z + wall_buf),
+            (self.env.max_x - wall_buf, self.cz),
+            (self.cx, self.env.max_z - wall_buf),
+            (self.env.min_x + wall_buf, self.cz),
+        ]
+
+        # Controller params
+        turn_step_deg = float(self.env.params.get_max("turn_step"))
+        self.turn_step_rad = turn_step_deg * math.pi / 180.0
+        fwd_step = float(self.env.max_forward_step)
+        self.reach_eps = max(0.05, 0.5 * fwd_step)
+
+        # State
+        self.current_idx = self._choose_start_edge_index()
+        self.target_idx = None
+        # align_inward -> observe_inward -> align_outward -> observe_outward -> align_to_center -> forward_to_center -> align_to_edge -> forward_to_edge
+        self.phase = "align_inward"
+        self.observe_remaining = self.observe_inward_steps
+        self._try_snap_to_edge(self.current_idx)
+
+    def _wrap(self, a: float) -> float:
+        return (a + math.pi) % (2 * math.pi) - math.pi
+
+    def _dir_to(self, x: float, z: float) -> float:
+        dx = x - float(self.env.agent.pos[0])
+        dz = z - float(self.env.agent.pos[2])
+        return math.atan2(-dz, dx)
+
+    def _is_pos_free(self, x: float, z: float) -> bool:
+        agent = self.env.agent
+        pos = agent.pos.copy()
+        pos[0] = float(x)
+        pos[2] = float(z)
+        return not bool(self.env.intersect(agent, pos, agent.radius))
+
+    def _set_agent_pose(self, x: float, z: float, dir_rad: float):
+        self.env.agent.pos[0] = float(x)
+        self.env.agent.pos[2] = float(z)
+        self.env.agent.dir = float(self._wrap(dir_rad))
+
+    def _try_snap_to_edge(self, idx: int):
+        ax, az = float(self.env.agent.pos[0]), float(self.env.agent.pos[2])
+        candidates = []
+        for i, (x, z) in enumerate(self.edge_points):
+            d = (x - ax) ** 2 + (z - az) ** 2
+            candidates.append((d, i, x, z))
+        candidates.sort()
+        for _, i, x, z in candidates:
+            if self._is_pos_free(x, z):
+                self._set_agent_pose(x, z, self.env.agent.dir)
+                self.current_idx = i
+                return
+
+    def _choose_start_edge_index(self) -> int:
+        ax, az = float(self.env.agent.pos[0]), float(self.env.agent.pos[2])
+        dists = []
+        for i, (x, z) in enumerate(self.edge_points):
+            d = (x - ax) ** 2 + (z - az) ** 2
+            dists.append((d, i))
+        dists.sort()
+        return dists[0][1]
+
+    def _turn_toward(self, desired: float) -> Optional[int]:
+        a = self.env.actions
+        curr = float(self.env.agent.dir)
+        err = abs(self._wrap(desired - curr))
+        if err <= self.turn_step_rad * 0.5:
+            return None
+        left_err = abs(self._wrap(desired - (curr + self.turn_step_rad)))
+        right_err = abs(self._wrap(desired - (curr - self.turn_step_rad)))
+        return a.turn_left if left_err <= right_err else a.turn_right
+
+    def _desired_inward_dir(self) -> float:
+        x, z = float(self.env.agent.pos[0]), float(self.env.agent.pos[2])
+        return math.atan2(-(self.cz - z), (self.cx - x))
+
+    def _next_idx(self) -> int:
+        return (self.current_idx + 1) % 4
+
+    def _choose_next_edge_random(self) -> int:
+        candidates = [0, 1, 2, 3]
+        try:
+            candidates.remove(self.current_idx)
+        except ValueError:
+            pass
+        j = int(self.rng.integers(0, len(candidates)))
+        return int(candidates[j])
+
+    def action(self, step_idx: int) -> int:
+        a = self.env.actions
+        agent = self.env.agent
+        ax, az = float(agent.pos[0]), float(agent.pos[2])
+
+        if self.phase == "align_inward":
+            desired = self._desired_inward_dir()
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                return turn
+            self.phase = "observe_inward"
+            self.observe_remaining = self.observe_inward_steps
+            return a.pickup
+
+        if self.phase == "observe_inward":
+            if self.observe_remaining > 0:
+                self.observe_remaining -= 1
+                return a.pickup
+            self.phase = "align_outward"
+
+        if self.phase == "align_outward":
+            inward = self._desired_inward_dir()
+            desired = self._wrap(inward + math.pi)
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                return turn
+            self.phase = "observe_outward"
+            self.observe_remaining = self.observe_outward_steps
+            return a.pickup
+
+        if self.phase == "observe_outward":
+            if self.observe_remaining > 0:
+                self.observe_remaining -= 1
+                return a.pickup
+            self.phase = "align_to_center"
+
+        if self.phase == "align_to_center":
+            desired = self._dir_to(self.cx, self.cz)
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                return turn
+            self.phase = "forward_to_center"
+            return a.pickup
+
+        if self.phase == "forward_to_center":
+            dx, dz = (self.cx - ax), (self.cz - az)
+            dist = math.hypot(dx, dz)
+            if dist <= self.reach_eps:
+                self._set_agent_pose(self.cx, self.cz, agent.dir)
+                self.phase = "align_to_edge"
+                return a.pickup
+            fwd_step = float(self.env.max_forward_step)
+            ahead_x = ax + math.cos(float(agent.dir)) * fwd_step
+            ahead_z = az - math.sin(float(agent.dir)) * fwd_step
+            if self._is_pos_free(ahead_x, ahead_z):
+                return a.move_forward
+            return a.pickup
+
+        if self.phase == "align_to_edge":
+            if self.target_idx is None:
+                self.target_idx = self._choose_next_edge_random()
+            tx, tz = self.edge_points[self.target_idx]
+            desired = self._dir_to(tx, tz)
+            turn = self._turn_toward(desired)
+            if turn is not None:
+                return turn
+            self.phase = "forward_to_edge"
+            return a.pickup
+
+        if self.phase == "forward_to_edge":
+            tx, tz = self.edge_points[self.target_idx]
+            dx, dz = (tx - ax), (tz - az)
+            dist = math.hypot(dx, dz)
+            if dist <= self.reach_eps:
+                self._set_agent_pose(tx, tz, agent.dir)
+                self.current_idx = self.target_idx
+                self.target_idx = None
+                self.phase = "align_inward"
+                self.observe_remaining = self.observe_inward_steps
+                return a.pickup
+            fwd_step = float(self.env.max_forward_step)
+            ahead_x = ax + math.cos(float(agent.dir)) * fwd_step
+            ahead_z = az - math.sin(float(agent.dir)) * fwd_step
+            if self._is_pos_free(ahead_x, ahead_z):
+                return a.move_forward
+            return a.pickup
+
+        return a.pickup
+
 class PeeakbooPolicy:
     """
     Stationary: spawn at the midpoint of a random wall, then alternate:
@@ -687,7 +915,8 @@ class PeeakbooPolicy:
         a = self.env.actions
         curr = float(self.env.agent.dir)
         err = abs(self._wrap(desired - curr))
-        if err <= self.turn_step_rad * 0.5:
+        # Accept alignment if within half a turn step plus a tiny epsilon to avoid oscillations
+        if err <= (self.turn_step_rad * 0.5 + 1e-3):
             return None
         left_err = abs(self._wrap(desired - (curr + self.turn_step_rad)))
         right_err = abs(self._wrap(desired - (curr - self.turn_step_rad)))
@@ -744,11 +973,13 @@ class BiasedWalkV2Policy:
       - NOOP is implemented as env.pickup action id
     """
 
-    def __init__(self, env: gym.Env, forward_prob: float = 0.8, observe_steps: int = 5):
+    def __init__(self, env: gym.Env, forward_prob: float = 0.8, observe_steps: int = 5, debug: bool = False, debug_writer=None):
         self.env = env.unwrapped
         self.rng = self.env.np_random
         self.forward_prob = float(forward_prob)
         self.observe_steps = int(max(0, observe_steps))
+        self.debug = bool(debug)
+        self.debug_writer = debug_writer
 
         # Room center
         self.cx = float((self.env.min_x + self.env.max_x) * 0.5)
@@ -757,17 +988,22 @@ class BiasedWalkV2Policy:
         # Discrete turn step in radians
         turn_step_deg = float(self.env.params.get_max("turn_step"))
         self.turn_step_rad = turn_step_deg * math.pi / 180.0
+        self.align_eps_rad = math.radians(5.0)
 
         # State machine
         self.phase = "spawn_to_wall"
         self.look_remaining = self.observe_steps
         self.crawl_sign = 0  # +1 for left, -1 for right
         self.target_dir = None
-        # Stuck mitigation state
-        self._last_pos = None
-        self._prev_action = None
-        self._turn_streak = 0
-        self._prefer_forward_next = False
+
+    def _dist_to_walls(self, pos: np.ndarray) -> float:
+        x, _, z = pos
+        return min(
+            x - self.env.min_x,
+            self.env.max_x - x,
+            z - self.env.min_z,
+            self.env.max_z - z,
+        )
 
     def _wrap(self, a: float) -> float:
         return (a + math.pi) % (2 * math.pi) - math.pi
@@ -793,11 +1029,19 @@ class BiasedWalkV2Policy:
         next_pos = self._ahead_pos(agent.pos, float(agent.dir), fwd_step)
         return bool(self.env.intersect(agent, next_pos, agent.radius))
 
+    def _log(self, msg: str):
+        if not self.debug:
+            return
+        if self.debug_writer is not None:
+            self.debug_writer(msg)
+        else:
+            print(msg)
+
     def _turn_toward(self, desired: float) -> Optional[int]:
         a = self.env.actions
         curr = float(self.env.agent.dir)
         err = abs(self._wrap(desired - curr))
-        if err <= self.turn_step_rad * 0.5:
+        if err <= (self.turn_step_rad * 0.5 + self.align_eps_rad):
             return None
         # choose left/right turn that reduces error
         left_err = abs(self._wrap(desired - (curr + self.turn_step_rad)))
@@ -807,159 +1051,143 @@ class BiasedWalkV2Policy:
     def action(self, step_idx: int) -> int:
         a = self.env.actions
         agent = self.env.agent
-
-        # Track movement and turning streak
-        if self._last_pos is None:
-            self._last_pos = agent.pos.copy()
-        moved = float(np.linalg.norm(agent.pos[[(0, 2)]] - self._last_pos[[(0, 2)]])) > 1e-6
-        if moved or self._prev_action == a.move_forward:
-            self._turn_streak = 0
-        elif self._prev_action in (a.turn_left, a.turn_right):
-            self._turn_streak += 1
-
-        def _emit(action_id: int) -> int:
-            self._prev_action = action_id
-            self._last_pos = agent.pos.copy()
-            if action_id in (a.turn_left, a.turn_right):
-                self._prefer_forward_next = True
-            return action_id
+        # Optional debug snapshot
+        fwd_blocked = self._forward_blocked()
+        center_dir = self._dir_to(self.cx, self.cz)
+        self._log(
+            f"[BWv2] t={step_idx:04d} phase={self.phase} pos=({float(agent.pos[0]):.2f},{float(agent.pos[2]):.2f}) "
+            f"dir={math.degrees(float(agent.dir))%360:.1f} deg center_dir={math.degrees(center_dir)%360:.1f} "
+            f"fwd_blocked={int(fwd_blocked)} crawl_sign={self.crawl_sign}"
+        )
 
         # 0) Spawn: go straight until we hit a wall
         if self.phase == "spawn_to_wall":
             if not self._forward_blocked():
-                return _emit(a.move_forward)
-            # transition to look
+                return a.move_forward
             self.phase = "look_align"
             self.look_remaining = self.observe_steps
-            return _emit(a.pickup)
+            return a.pickup
 
         # 1) Look: face the center and pause
         if self.phase == "look_align":
             desired = self._dir_to(self.cx, self.cz)
             turn = self._turn_toward(desired)
             if turn is not None:
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
+                self._log(f"[BWv2] action=turn ({'L' if turn==a.turn_left else 'R'}) in look_align")
+                return turn
             self.phase = "look_observe"
             self.look_remaining = self.observe_steps
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter look_observe")
+            return a.pickup
 
         if self.phase == "look_observe":
             if self.look_remaining > 0:
                 self.look_remaining -= 1
-                return _emit(a.pickup)
+                return a.pickup
             # choose crawl side and align along wall (left/right relative to inward)
             self.crawl_sign = +1 if float(self.rng.random()) < 0.5 else -1
             self.phase = "wall_crawl_align"
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter wall_crawl_align")
+            return a.pickup
 
         # 2) Wall crawl
         if self.phase == "wall_crawl_align":
             center_dir = self._dir_to(self.cx, self.cz)
             desired = self._wrap(center_dir + (self.crawl_sign * (math.pi / 2.0)))
+            # If we can step forward, treat as aligned (prevents corner oscillation)
+            if not self._forward_blocked():
+                self.phase = "wall_crawl_move"
+                self._log("[BWv2] forward free in wall_crawl_align -> enter wall_crawl_move")
+                return a.pickup
             turn = self._turn_toward(desired)
             if turn is not None:
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
+                self._log(f"[BWv2] action=turn ({'L' if turn==a.turn_left else 'R'}) in wall_crawl_align")
+                return turn
             self.phase = "wall_crawl_move"
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter wall_crawl_move")
+            return a.pickup
 
         if self.phase == "wall_crawl_move":
-            # Continue forward with forward_prob; otherwise start turning inward to walk into room
-            if self._prefer_forward_next and not self._forward_blocked():
-                self._prefer_forward_next = False
-                return _emit(a.move_forward)
-            if float(self.rng.random()) < self.forward_prob:
-                if not self._forward_blocked():
-                    return _emit(a.move_forward)
-                # corner: turn to keep hugging wall (left-hand rule: turn right; right-hand: turn left)
-                turn = a.turn_right if self.crawl_sign > 0 else a.turn_left
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
+            # With forward_prob move along the wall; if blocked, turn to keep hugging
+            if float(self.rng.random()) < self.forward_prob and not self._forward_blocked():
+                self._log("[BWv2] action=forward along wall")
+                return a.move_forward
+            if self._forward_blocked():
+                # left-hand rule: turn right; right-hand rule: turn left
+                # Log predicted blockage after a single turn in each direction
+                turn_step_rad = self.turn_step_rad
+                curr_dir = float(agent.dir)
+                # predict next forward blocked if we turn left/right once
+                left_dir = curr_dir + turn_step_rad
+                right_dir = curr_dir - turn_step_rad
+                fwd_step = float(self.env.max_forward_step)
+                left_next = self._ahead_pos(agent.pos, left_dir, fwd_step)
+                right_next = self._ahead_pos(agent.pos, right_dir, fwd_step)
+                left_blocked = bool(self.env.intersect(agent, left_next, agent.radius))
+                right_blocked = bool(self.env.intersect(agent, right_next, agent.radius))
+                self._log(f"[BWv2] corner: fwd_blocked=1 left_next_blocked={int(left_blocked)} right_next_blocked={int(right_blocked)}")
+                act = a.turn_right if self.crawl_sign > 0 else a.turn_left
+                self._log(f"[BWv2] action=turn ({'R' if act==a.turn_right else 'L'}) in corner")
+                return act
             # decide to turn inward
-            center_dir = self._dir_to(self.cx, self.cz)
-            self.target_dir = center_dir
+            self.target_dir = self._dir_to(self.cx, self.cz)
             self.phase = "walk_room_align"
-            turn = self._turn_toward(self.target_dir)
-            if turn is not None:
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
-            # already aligned
-            self.phase = "walk_room_move"
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter walk_room_align")
+            return a.pickup
 
         # 3) Walk in room
         if self.phase == "walk_room_align":
             turn = self._turn_toward(self.target_dir)
             if turn is not None:
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
+                self._log(f"[BWv2] action=turn ({'L' if turn==a.turn_left else 'R'}) in walk_room_align")
+                return turn
             self.phase = "walk_room_move"
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter walk_room_move")
+            return a.pickup
 
         if self.phase == "walk_room_move":
-            if self._prefer_forward_next and not self._forward_blocked():
-                self._prefer_forward_next = False
-                return _emit(a.move_forward)
-            if float(self.rng.random()) < self.forward_prob:
-                if not self._forward_blocked():
-                    return _emit(a.move_forward)
-                # unexpected blockage inside room: fall back to go-to-wall behavior
+            if float(self.rng.random()) < self.forward_prob and not self._forward_blocked():
+                self._log("[BWv2] action=forward in room")
+                return a.move_forward
             # commit to a discrete turn and then go straight to the wall
             turn_sign = +1 if float(self.rng.random()) < 0.5 else -1
             curr_dir = float(agent.dir)
             self.target_dir = self._wrap(curr_dir + turn_sign * self.turn_step_rad)
             self.phase = "go_to_wall_align"
-            turn = self._turn_toward(self.target_dir)
-            if turn is not None:
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
-            self.phase = "go_to_wall_move"
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter go_to_wall_align")
+            return a.pickup
 
         if self.phase == "go_to_wall_align":
             turn = self._turn_toward(self.target_dir)
             if turn is not None:
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
+                self._log(f"[BWv2] action=turn ({'L' if turn==a.turn_left else 'R'}) in go_to_wall_align")
+                return turn
             self.phase = "go_to_wall_move"
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter go_to_wall_move")
+            return a.pickup
 
         if self.phase == "go_to_wall_move":
             if not self._forward_blocked():
-                return _emit(a.move_forward)
+                self._log("[BWv2] action=forward to wall")
+                return a.move_forward
             # Hit wall: turn around, then go to look phase
             self.target_dir = self._wrap(float(agent.dir) + math.pi)
             self.phase = "turn_around_align"
-            turn = self._turn_toward(self.target_dir)
-            if turn is not None:
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
-            # already turned around
-            self.phase = "look_align"
-            self.look_remaining = self.observe_steps
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter turn_around_align")
+            return a.pickup
 
         if self.phase == "turn_around_align":
             turn = self._turn_toward(self.target_dir)
             if turn is not None:
-                if self._turn_streak >= 6 and not self._forward_blocked():
-                    return _emit(a.move_forward)
-                return _emit(turn)
+                self._log(f"[BWv2] action=turn ({'L' if turn==a.turn_left else 'R'}) in turn_around_align")
+                return turn
             self.phase = "look_align"
             self.look_remaining = self.observe_steps
-            return _emit(a.pickup)
+            self._log("[BWv2] action=NOOP enter look_align")
+            return a.pickup
 
-        # fallback: NOOP
-        return _emit(a.pickup)
+        # fallback
+        return a.pickup
 
 def _wrap_angle(a: np.ndarray) -> np.ndarray:
     return (a + np.pi) % (2 * np.pi) - np.pi
@@ -1007,7 +1235,18 @@ def run_rollout(
     elif policy_name == "edge_plus":
         policy = EdgePlusPolicy(env=env, observe_steps=observe_steps)
     elif policy_name == "biased_walk_v2":
-        policy = BiasedWalkV2Policy(env=env, forward_prob=policy_kwargs.get("forward_prob", 0.8), observe_steps=observe_steps)
+        policy = BiasedWalkV2Policy(
+            env=env,
+            forward_prob=policy_kwargs.get("forward_prob", 0.8),
+            observe_steps=observe_steps,
+            debug=policy_kwargs.get("debug", False),
+        )
+    elif policy_name == "peekaboo_motion":
+        policy = PeekabooMotionPolicy(
+            env=env,
+            observe_inward_steps=policy_kwargs.get("observe_inward_steps", observe_steps),
+            observe_outward_steps=policy_kwargs.get("observe_outward_steps", max(1, observe_steps * 4)),
+        )
     elif policy_name == "peeakboo":
         policy = PeeakbooPolicy(env=env, observe_steps=observe_steps)
     else:
@@ -1138,6 +1377,9 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         wall_buffer=args.wall_buffer,
         avoid_turning_into_walls=args.avoid_turning_into_walls,
         lookahead_mult=args.lookahead_mult,
+        debug=args.debug_join,
+        observe_inward_steps=(args.observe_inward_steps if args.observe_inward_steps is not None else args.observe_steps),
+        observe_outward_steps=(args.observe_outward_steps if args.observe_outward_steps is not None else (4 * args.observe_steps)),
     )
 
     rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
@@ -1219,6 +1461,11 @@ def main():
     parser.add_argument("--grid-vel-min", type=int, default=-1)
     parser.add_argument("--grid-vel-max", type=int, default=1)
     parser.add_argument("--grid-cardinal-only", action="store_true", help="grid mode: restrict block motion to cardinal directions only")
+    # Block count and color palette controls (MovingBlockWorld)
+    parser.add_argument("--num-blocks", type=int, default=None, help="override number of blocks")
+    parser.add_argument("--num-blocks-min", type=int, default=None, help="min number of blocks (sampled uniformly if max is set)")
+    parser.add_argument("--num-blocks-max", type=int, default=None, help="max number of blocks (sampled uniformly if min is set)")
+    parser.add_argument("--ensure-base-palette", action="store_true", help="ensure at least one of each base colors: green, red, yellow, blue, purple, gray; remainder random")
     parser.add_argument("--debug-join", dest="debug_join", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--output-2d-map", dest="output_2d_map", action="store_true", help="save the top-view map as a separate MP4 named *_map_2d.mp4")
     parser.add_argument("--spawn-wall-buffer", type=float, default=1.0, help="extra buffer from walls when spawning agent and boxes (meters)")
@@ -1248,7 +1495,7 @@ def main():
     )
 
     # Policy selection and knobs
-    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "biased_walk_v2", "back_and_forth", "center_rotate", "do_nothing", "edge_plus", "peeakboo"], help="which control policy to use")
+    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "biased_walk_v2", "back_and_forth", "center_rotate", "do_nothing", "edge_plus", "peeakboo", "peekaboo_motion"], help="which control policy to use")
     parser.add_argument("--forward-prob", type=float, default=0.8, help="biased_random: probability of moving forward when safe")
     parser.add_argument("--turn-left-weight", type=float, default=1.0, help="biased_random: relative weight for choosing left turns")
     parser.add_argument("--turn-right-weight", type=float, default=1.0, help="biased_random: relative weight for choosing right turns")
@@ -1257,8 +1504,10 @@ def main():
     parser.add_argument("--lookahead-mult", type=float, default=2.0, help="biased_random: lookahead distance multiplier relative to max forward step")
     # Agent spawn option: place agent at the center (uses env support)
     parser.add_argument("--agent-center-start", action="store_true", help="spawn the agent at the room center (top-left of middle for even sizes)")
-    # EdgePlus observation duration
-    parser.add_argument("--observe-steps", type=int, default=5, help="edge_plus: number of NOOP steps to observe at each edge center")
+    # EdgePlus/Peekaboo observation duration
+    parser.add_argument("--observe-steps", type=int, default=5, help="edge_plus: number of NOOP steps to observe at each edge center; also used as default inward observe for peekaboo_motion")
+    parser.add_argument("--observe-inward-steps", type=int, default=None, help="peekaboo_motion: number of NOOP steps to observe inward at edge (defaults to --observe-steps)")
+    parser.add_argument("--observe-outward-steps", type=int, default=None, help="peekaboo_motion: number of NOOP steps to observe outward at edge (defaults to 4x inward)")
 
     args = parser.parse_args()
 
@@ -1277,6 +1526,9 @@ def main():
         wall_buffer=args.wall_buffer,
         avoid_turning_into_walls=args.avoid_turning_into_walls,
         lookahead_mult=args.lookahead_mult,
+        debug=args.debug_join,
+        observe_inward_steps=(args.observe_inward_steps if getattr(args, "observe_inward_steps", None) is not None else args.observe_steps),
+        observe_outward_steps=(args.observe_outward_steps if getattr(args, "observe_outward_steps", None) is not None else (4 * args.observe_steps)),
     )
 
     rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
