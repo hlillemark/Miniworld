@@ -179,8 +179,8 @@ python -m scripts.generate_videos_batch \
 
 python -m scripts.generate_videos_batch \
   --env-name MiniWorld-MovingBlockWorld-v0 \
-  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/peekaboo_training \
-  --num-videos 2000 --block-size 256 --num-processes 32 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/peekaboo_full_training \
+  --num-videos 10000 --block-size 256 --num-processes 32 \
   -- \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
@@ -193,8 +193,8 @@ python -m scripts.generate_videos_batch \
 
 python -m scripts.generate_videos_batch \
   --env-name MiniWorld-MovingBlockWorld-v0 \
-  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/peekaboo_validation \
-  --num-videos 250 --block-size 64 --num-processes 32 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/peekaboo_full_validation \
+  --num-videos 1000 --block-size 64 --num-processes 32 \
   -- \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
@@ -204,18 +204,8 @@ python -m scripts.generate_videos_batch \
   --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
   --policy peeakboo --observe-steps 70 --cam-fov-y 60
   
-  python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 500 --out-prefix ./out/biased_walk_v2 --debug-join --output-2d-map --room-size 16 \
-  --block-size-xy 0.7 --block-height 1.5 \
-  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
-  --policy biased_walk_v2 --forward-prob 0.9 --cam-fov-y 60 \
-  --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette
   
-  
+# SUNDAY V2
 python -m scripts.generate_videos_batch \
   --env-name MiniWorld-MovingBlockWorld-v0 \
   --dataset-root /data/hansen/projects/wm-memory/data/blockworld/sunday_v2_training \
@@ -229,7 +219,6 @@ python -m scripts.generate_videos_batch \
   --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
   --policy biased_walk_v2 --forward-prob 0.92 --cam-fov-y 60 \
   --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette
-
 
 python -m scripts.generate_videos_batch \
   --env-name MiniWorld-MovingBlockWorld-v0 \
@@ -245,6 +234,63 @@ python -m scripts.generate_videos_batch \
   --policy biased_walk_v2 --forward-prob 0.92 --cam-fov-y 60 \
   --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette
   
+  
+# MOVING PEEKABOO
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/peekaboo_motion_training \
+  --num-videos 10000 --block-size 256 --num-processes 32 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy peekaboo_motion --observe-inward-steps 5 --observe-outward-steps 70 --cam-fov-y 60
+  
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/peekaboo_motion_validation \
+  --num-videos 1000 --block-size 64 --num-processes 32 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy peekaboo_motion --observe-inward-steps 5 --observe-outward-steps 70 --cam-fov-y 60
+  
+
+# STATIC SUNDAY V2
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/sunday_v2_static_training \
+  --num-videos 10000 --block-size 256 --num-processes 48 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy biased_walk_v2 --forward-prob 0.9 --cam-fov-y 60 \
+  --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette --blocks-static
+
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/sunday_v2_static_validation \
+  --num-videos 1000 --block-size 64 --num-processes 48 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy biased_walk_v2 --forward-prob 0.9 --cam-fov-y 60 \
+  --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette --blocks-static
 
 Note the positional "--" separator: all arguments after it are forwarded
 verbatim to scripts.generate_videos (single-run).
