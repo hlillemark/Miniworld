@@ -456,16 +456,19 @@ class MiniWorldEnv(gym.Env):
         # Move forward or back by a small amount
         move_forward = 2
         move_back = 3
+        
+        # CUSTOM ADDED: 
+        do_nothing = 4
 
         # Pick up or drop an object being carried
-        pickup = 4
-        drop = 5
+        pickup = 5
+        drop = 6
 
         # Toggle/activate an object
-        toggle = 6
+        toggle = 7
 
         # Done completing task
-        done = 7
+        done = 8
 
     def __init__(
         self,
@@ -690,6 +693,9 @@ class MiniWorldEnv(gym.Env):
 
         elif action == self.actions.turn_right:
             self.turn_agent(-turn_step)
+            
+        elif action == self.actions.do_nothing:
+            pass
 
         # Pick up an object
         elif action == self.actions.pickup:

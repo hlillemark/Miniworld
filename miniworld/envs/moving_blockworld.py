@@ -2,7 +2,7 @@ from gymnasium import utils
 import math
 import numpy as np
 
-from miniworld.entity import Box, COLOR_NAMES
+from miniworld.entity import Box, Ball, COLOR_NAMES
 from miniworld.envs.putnext import PutNext
 from miniworld.math import intersect_circle_segs
 from miniworld.miniworld import MiniWorldEnv
@@ -36,6 +36,11 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         floor_tex="concrete",
         wall_tex="white",
         ceil_tex="ceiling_tile_noborder",
+        box_tex=None,
+        box_tex_randomize=False,
+        wall_tex_randomize=False,
+        floor_tex_randomize=False,
+        box_and_ball=False,
         box_speed_scale=1.0,
         box_allow_overlap=False,
         agent_box_allow_overlap=False,
@@ -81,6 +86,18 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         self._floor_tex_override = str(floor_tex) if floor_tex is not None else None
         self._wall_tex_override = str(wall_tex) if wall_tex is not None else None
         self._ceil_tex_override = str(ceil_tex) if ceil_tex is not None else None
+        self._box_tex_override = str(box_tex) if box_tex is not None else None
+        self.box_tex_randomize = bool(box_tex_randomize)
+        # Default pool for randomized box textures
+        self._box_tex_pool = ["ceiling_tiles", "airduct_grate", "checkerboard"]
+        # Randomize room textures
+        self.wall_tex_randomize = bool(wall_tex_randomize)
+        self.floor_tex_randomize = bool(floor_tex_randomize)
+        # Default pools for walls/floors
+        self._wall_tex_pool = ["brick_wall", "wood_planks", "wood"]
+        self._floor_tex_pool = ["cardboard", "grass", "concrete"]
+        # Randomize between box and ball per entity
+        self.box_and_ball = bool(box_and_ball)
         super().__init__(size=size, **kwargs)
         # Keep for compatibility; not used for reward anymore
         self.near_margin = (
@@ -112,16 +129,28 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
             self.block_height,
             self.agent_center_start,
             block_torus_wrap=block_torus_wrap,
+            box_tex=box_tex,
+            box_tex_randomize=box_tex_randomize,
+            wall_tex_randomize=wall_tex_randomize,
+            floor_tex_randomize=floor_tex_randomize,
+            box_and_ball=box_and_ball,
             **kwargs,
         )
 
     def _gen_world(self):
         # Create a rectangular room
         room_kwargs = {}
-        if getattr(self, "_floor_tex_override", None) is not None:
+        # Floor texture choice (randomization overrides explicit override)
+        if self.floor_tex_randomize:
+            room_kwargs["floor_tex"] = str(self.np_random.choice(self._floor_tex_pool))
+        elif getattr(self, "_floor_tex_override", None) is not None:
             room_kwargs["floor_tex"] = self._floor_tex_override
-        if getattr(self, "_wall_tex_override", None) is not None:
+        # Wall texture choice (randomization overrides explicit override)
+        if self.wall_tex_randomize:
+            room_kwargs["wall_tex"] = str(self.np_random.choice(self._wall_tex_pool))
+        elif getattr(self, "_wall_tex_override", None) is not None:
             room_kwargs["wall_tex"] = self._wall_tex_override
+        # Ceiling override unchanged
         if getattr(self, "_ceil_tex_override", None) is not None:
             room_kwargs["ceil_tex"] = self._ceil_tex_override
         # wall_tex="concrete",
@@ -199,22 +228,33 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
 
         # Place blocks with either uniform or random sizes
         for color in chosen_colors:
-            if (self.block_size_xy is not None) or (self.block_height is not None):
-                # Use provided controls; default footprint if only height provided
-                sx = self.block_size_xy if self.block_size_xy is not None else 0.75
-                sy = self.block_height if self.block_height is not None else sx
-                sz = sx
-                box = Box(color=color, size=np.array([sx, sy, sz], dtype=float))
+            # Choose texture per box if randomization is enabled; else use override
+            if self.box_tex_randomize:
+                tex_name = str(self.np_random.choice(self._box_tex_pool))
             else:
-                # Backward-compatible random cube size
-                box = Box(color=color, size=self.np_random.uniform(0.6, 0.85))
+                tex_name = self._box_tex_override
+            # Choose entity type if enabled, 1 in 3 chance to be a ball
+            spawn_ball = bool(self.box_and_ball and (int(self.np_random.integers(0, 3)) == 1))
+            if spawn_ball:
+                # ent = Ball(color=color, size=float(self.np_random.uniform(0.6, 0.85)))
+                ent = Ball(color=color, size=0.85)
+            else:
+                if (self.block_size_xy is not None) or (self.block_height is not None):
+                    # Use provided controls; default footprint if only height provided
+                    sx = self.block_size_xy if self.block_size_xy is not None else 0.75
+                    sy = self.block_height if self.block_height is not None else sx
+                    sz = sx
+                    ent = Box(color=color, size=np.array([sx, sy, sz], dtype=float), texture=tex_name)
+                else:
+                    # Backward-compatible random cube size
+                    ent = Box(color=color, size=self.np_random.uniform(0.6, 0.85), texture=tex_name)
             # Re-try placement if spawned exactly at the agent's (x,z)
             attempts = 0
             while True:
                 attempts += 1
-                mnx, mxx, mnz, mxz = _spawn_extents(box.radius if hasattr(box, 'radius') else 0.3)
+                mnx, mxx, mnz, mxz = _spawn_extents(ent.radius if hasattr(ent, 'radius') else 0.3)
                 self.place_entity(
-                    box,
+                    ent,
                     min_x=mnx,
                     max_x=mxx,
                     min_z=mnz,
@@ -222,12 +262,12 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
                 )
                 # Compare only XZ for exact location match
                 if hasattr(self, 'agent') and (self.agent is not None):
-                    same_x = abs(float(box.pos[0]) - float(self.agent.pos[0])) < 1e-6
-                    same_z = abs(float(box.pos[2]) - float(self.agent.pos[2])) < 1e-6
+                    same_x = abs(float(ent.pos[0]) - float(self.agent.pos[0])) < 1e-6
+                    same_z = abs(float(ent.pos[2]) - float(self.agent.pos[2])) < 1e-6
                     if same_x and same_z:
                         # Remove and retry
                         try:
-                            self.entities.remove(box)
+                            self.entities.remove(ent)
                         except ValueError:
                             pass
                         if attempts < 100:
@@ -261,13 +301,13 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
 
         if not self.box_random_orientation:
             for ent in self.entities:
-                if isinstance(ent, Box):
+                if isinstance(ent, (Box, Ball)):
                     ent.dir = 0.0
 
         if self.grid_mode:
             self._snap_entity_to_grid(self.agent)
             for ent in self.entities:
-                if isinstance(ent, Box):
+                if isinstance(ent, (Box, Ball)):
                     self._snap_entity_to_grid(ent)
 
         # Assign velocities
@@ -275,7 +315,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         move_step = self.params.sample(rand, "forward_step") * self.box_speed_scale
 
         for ent in self.entities:
-            if not isinstance(ent, Box):
+            if not isinstance(ent, (Box, Ball)):
                 continue
             if self.blocks_static:
                 # Do not assign velocities for static mode
@@ -322,11 +362,11 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         for ent2 in self.entities:
             if ent2 is ent:
                 continue
-            if self.box_allow_overlap and isinstance(ent, Box) and isinstance(ent2, Box):
+            if self.box_allow_overlap and isinstance(ent, (Box, Ball)) and isinstance(ent2, (Box, Ball)):
                 continue
             if self.agent_box_allow_overlap and (
-                (ent is self.agent and isinstance(ent2, Box))
-                or (ent2 is self.agent and isinstance(ent, Box))
+                (ent is self.agent and isinstance(ent2, (Box, Ball)))
+                or (ent2 is self.agent and isinstance(ent, (Box, Ball)))
             ):
                 continue
 
@@ -346,11 +386,11 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         for ent2 in self.entities:
             if ent2 is ent:
                 continue
-            if self.box_allow_overlap and isinstance(ent, Box) and isinstance(ent2, Box):
+            if self.box_allow_overlap and isinstance(ent, (Box, Ball)) and isinstance(ent2, (Box, Ball)):
                 continue
             if self.agent_box_allow_overlap and (
-                (ent is self.agent and isinstance(ent2, Box))
-                or (ent2 is self.agent and isinstance(ent, Box))
+                (ent is self.agent and isinstance(ent2, (Box, Ball)))
+                or (ent2 is self.agent and isinstance(ent, (Box, Ball)))
             ):
                 continue
 
@@ -410,7 +450,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
         carrying = self.agent.carrying
 
         for ent in list(self.entities):
-            if not isinstance(ent, Box):
+            if not isinstance(ent, (Box, Ball)):
                 continue
             if carrying is not None and ent is carrying:
                 continue
@@ -441,18 +481,18 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
                     else:
                         # Move unless blocked by entity; if blocked, bounce off entity
                         hit_ent = self._intersect_entities_only(ent, candidate, ent.radius)
-                        if (not hit_ent) or (self.box_allow_overlap and isinstance(hit_ent, Box)):
+                        if (not hit_ent) or (self.box_allow_overlap and isinstance(hit_ent, (Box, Ball))):
                             current_pos = candidate
                         else:
                             ent.velocity[0] = -ent.velocity[0]
                             candidate_bounce = current_pos.copy()
                             candidate_bounce[0] += ent.velocity[0]
                             hit_bounce = self._intersect_entities_only(ent, candidate_bounce, ent.radius)
-                            if (not hit_bounce) or (self.box_allow_overlap and isinstance(hit_bounce, Box)):
+                            if (not hit_bounce) or (self.box_allow_overlap and isinstance(hit_bounce, (Box, Ball))):
                                 current_pos = candidate_bounce
                 else:
                     hit = self.intersect(ent, candidate, ent.radius)
-                    if (not hit) or (self.box_allow_overlap and isinstance(hit, Box)):
+                    if (not hit) or (self.box_allow_overlap and isinstance(hit, (Box, Ball))):
                         current_pos = candidate
                     else:
                         ent.velocity[0] = -ent.velocity[0]
@@ -460,7 +500,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
                         candidate_bounce[0] += ent.velocity[0]
                         hit_bounce = self.intersect(ent, candidate_bounce, ent.radius)
                         if (not hit_bounce) or (
-                            self.box_allow_overlap and isinstance(hit_bounce, Box)
+                            self.box_allow_overlap and isinstance(hit_bounce, (Box, Ball))
                         ):
                             current_pos = candidate_bounce
             if self.grid_mode:
@@ -483,18 +523,18 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
                         current_pos = wrapped
                     else:
                         hit_ent = self._intersect_entities_only(ent, candidate, ent.radius)
-                        if (not hit_ent) or (self.box_allow_overlap and isinstance(hit_ent, Box)):
+                        if (not hit_ent) or (self.box_allow_overlap and isinstance(hit_ent, (Box, Ball))):
                             current_pos = candidate
                         else:
                             ent.velocity[2] = -ent.velocity[2]
                             candidate_bounce = current_pos.copy()
                             candidate_bounce[2] += ent.velocity[2]
                             hit_bounce = self._intersect_entities_only(ent, candidate_bounce, ent.radius)
-                            if (not hit_bounce) or (self.box_allow_overlap and isinstance(hit_bounce, Box)):
+                            if (not hit_bounce) or (self.box_allow_overlap and isinstance(hit_bounce, (Box, Ball))):
                                 current_pos = candidate_bounce
                 else:
                     hit = self.intersect(ent, candidate, ent.radius)
-                    if (not hit) or (self.box_allow_overlap and isinstance(hit, Box)):
+                    if (not hit) or (self.box_allow_overlap and isinstance(hit, (Box, Ball))):
                         current_pos = candidate
                     else:
                         ent.velocity[2] = -ent.velocity[2]
@@ -502,7 +542,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
                         candidate_bounce[2] += ent.velocity[2]
                         hit_bounce = self.intersect(ent, candidate_bounce, ent.radius)
                         if (not hit_bounce) or (
-                            self.box_allow_overlap and isinstance(hit_bounce, Box)
+                            self.box_allow_overlap and isinstance(hit_bounce, (Box, Ball))
                         ):
                             current_pos = candidate_bounce
             if self.grid_mode:

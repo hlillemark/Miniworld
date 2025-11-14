@@ -87,6 +87,42 @@ python -m scripts.generate_videos \
   --policy biased_walk_v2 --forward-prob 0.92 --cam-fov-y 60 \
   --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette --blocks-static
 
+
+Test with bouncing blocks and different texture on the walls etc
+
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 100 --output-2d-map --room-size 12 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --grid-cardinal-only \
+  --policy biased_walk_v2 --forward-prob 0.90 --cam-fov-y 60 \
+  --num-blocks-min 6 --num-blocks-max 8 --ensure-base-palette \
+  --out-prefix ./out/bounce_tex --debug-join \
+  --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball
+  
+  --wall-tex wood --floor-tex cardboard --randomize-box-tex
+
+
+# BLOCKMOVER
+python -m scripts.generate_videos \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 100 --output-2d-map --room-size 12 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --grid-cardinal-only --blocks-static \
+  --policy blockmover --forward-prob 0.92 --cam-fov-y 60 \
+  --num-blocks-min 1 --num-blocks-max 1 --ensure-base-palette \
+  --out-prefix ./out/blockmover --debug-join
+  
+  \
+  --wall-tex wood --floor-tex cardboard
+
+
 single static generation
 add --blocks-static
   
@@ -196,6 +232,7 @@ if _HEADLESS_MODE:
 
 import miniworld
 from miniworld.params import DEFAULT_PARAMS
+from miniworld.entity import Box
 
 
 def build_env(args) -> gym.Env:
@@ -223,6 +260,20 @@ def build_env(args) -> gym.Env:
         env_kwargs["wall_tex"] = str(args.wall_tex)
     if getattr(args, "ceil_tex", None):
         env_kwargs["ceil_tex"] = str(args.ceil_tex)
+    # Box texture override if provided
+    if getattr(args, "box_tex", None):
+        env_kwargs["box_tex"] = str(args.box_tex)
+    # Per-box texture randomization (overrides box_tex if set)
+    if getattr(args, "randomize_box_tex", False):
+        env_kwargs["box_tex_randomize"] = True
+    # Wall/Floor randomization flags (override respective specific tex if set)
+    if getattr(args, "randomize_wall_tex", False):
+        env_kwargs["wall_tex_randomize"] = True
+    if getattr(args, "randomize_floor_tex", False):
+        env_kwargs["floor_tex_randomize"] = True
+    # Randomize spawning boxes/balls
+    if getattr(args, "box_and_ball", False):
+        env_kwargs["box_and_ball"] = True
 
     # Map supported custom kwargs
     if args.box_speed_scale is not None:
@@ -434,7 +485,7 @@ class CenterRotatePolicy:
             return a.turn_left
         if r == 1:
             return a.turn_right
-        return a.pickup  # id 4 used as NOOP in datasets
+        return a.do_nothing  # id 4 used as NOOP in datasets
     
 
 class DoNothingPolicy:
@@ -448,7 +499,312 @@ class DoNothingPolicy:
 
     def action(self, step_idx: int) -> int:
         a = self.env.actions
+        return a.do_nothing
+
+
+class BlockMoverPolicy:
+    """
+    Block mover with clear phases:
+      1) select_block -> choose the block to move
+      2) plan_to_block -> compute axis-aligned approach pose (same x or z, facing the block)
+      3) move_to_block -> execute the plan (turn/forward only)
+      4) pickup -> issue pickup
+      5) plan_to_target -> pick empty target and compute agent pose that will drop block in front
+      6) move_to_target -> execute plan
+      7) drop -> issue drop, then repeat
+    """
+
+    def __init__(self, env: gym.Env):
+        self.env = env.unwrapped
+        self.rng = self.env.np_random
+        # Ensure collisions are enforced (needed for pickup/drop/intersections)
+        if hasattr(self.env, "agent_box_allow_overlap"):
+            self.env.agent_box_allow_overlap = False
+        if hasattr(self.env, "box_allow_overlap"):
+            self.env.box_allow_overlap = False
+        # Cached step sizes
+        self.turn_step_rad = float(self.env.params.get_max("turn_step")) * math.pi / 180.0
+        self.fwd_step = float(self.env.max_forward_step)
+        # State
+        self.phase = "select_block"
+        self.block: Optional[Box] = None
+        self.target_pos: Optional[tuple] = None  # (x,z) for drop
+        self.plan_actions: list[int] = []
+        self.approach_pose: Optional[tuple] = None  # (x,z,dir_rad)
+
+    # -------- helpers --------
+    def _quantize(self, dir_rad: float) -> float:
+        s = self.turn_step_rad
+        return (round((dir_rad % (2 * math.pi)) / s) * s) % (2 * math.pi)
+
+    def _turn_steps_to(self, desired: float) -> list:
+        a = self.env.actions
+        curr = float(self.env.agent.dir)
+        step = self.turn_step_rad
+        c = self._quantize(curr)
+        d = self._quantize(desired)
+        diff = (d - c + math.pi) % (2 * math.pi) - math.pi
+        n = int(round(abs(diff) / step))
+        if n == 0:
+            return []
+        act = a.turn_left if diff > 0 else a.turn_right
+        return [act] * n
+
+    def _forward_safe_from(self, x: float, z: float, dir_rad: float, carrying: Optional[Box]) -> bool:
+        agent = self.env.agent
+        nx = x + math.cos(dir_rad) * self.fwd_step
+        nz = z - math.sin(dir_rad) * self.fwd_step
+        pos = agent.pos.copy()
+        d = float(agent.dir)
+        # simulate next pose
+        agent.pos[0] = nx
+        agent.pos[2] = nz
+        agent.dir = dir_rad
+        blocked = bool(self.env.intersect(agent, agent.pos, agent.radius))
+        if not blocked and carrying is not None:
+            cpos = self.env._get_carry_pos(agent.pos, carrying)
+            blocked = bool(self.env.intersect(carrying, cpos, carrying.radius))
+        # restore
+        agent.pos[:] = pos
+        agent.dir = d
+        return not blocked
+
+    def _build_axis_plan_from_current(self, tx: float, tz: float, tdir: float, carrying: Optional[Box]) -> Optional[list]:
+        a = self.env.actions
+        plan: list = []
+        # local sim
+        ax = float(self.env.agent.pos[0])
+        az = float(self.env.agent.pos[2])
+        ad = float(self.env.agent.dir)
+        eps = max(0.25 * self.fwd_step, 1e-3)
+
+        def sim_turns(des: float, p: list, x: float, z: float, d: float) -> tuple:
+            turns = self._turn_steps_to(des)
+            for t in turns:
+                p.append(t)
+                d = (d + (self.turn_step_rad if t == a.turn_left else -self.turn_step_rad)) % (2 * math.pi)
+            return x, z, d
+
+        def sim_forward_many(dist: float, heading: float, p: list, x: float, z: float, d: float) -> tuple:
+            steps = int(math.ceil(dist / self.fwd_step))
+            for _ in range(max(0, steps)):
+                if not self._forward_safe_from(x, z, heading, carrying):
+                    return None
+                p.append(a.move_forward)
+                x += math.cos(heading) * self.fwd_step
+                z -= math.sin(heading) * self.fwd_step
+            return (x, z, d)
+
+        # Try two orders: X then Z, or Z then X
+        for order in [(True, False), (False, True)]:
+            p = []
+            x, z, d = ax, az, ad
+            ok = True
+            if order[0]:
+                # move along X
+                dir_x = 0.0 if (tx - x) >= 0 else math.pi
+                x, z, d = sim_turns(dir_x, p, x, z, d)
+                res = sim_forward_many(abs(tx - x), d, p, x, z, d)
+                if res is None:
+                    ok = False
+                else:
+                    x, z, d = res
+            if ok and order[1]:
+                # move along Z
+                dir_z = math.pi / 2.0 if (tz - z) < 0 else -math.pi / 2.0
+                x, z, d = sim_turns(dir_z, p, x, z, d)
+                res = sim_forward_many(abs(tz - z), d, p, x, z, d)
+                if res is None:
+                    ok = False
+                else:
+                    x, z, d = res
+            if ok:
+                # final face
+                x, z, d = sim_turns(tdir, p, x, z, d)
+                return p
+        return None
+
+    def _bfs_plan_to_goal(self, is_goal_fn, carrying: Optional[Box]) -> Optional[list]:
+        """Grid BFS over (gx,gz,heading_idx) with actions {turn_left, turn_right, move_forward}."""
+        a = self.env.actions
+        step = self.fwd_step
+        turn_step = self.turn_step_rad
+        # Quantizers
+        def qpos(x, x0): return int(round((x - x0) / step))
+        def qdir(d): return int(round((d % (2 * math.pi)) / turn_step)) % max(1, int(round(2 * math.pi / turn_step)))
+        # Start
+        sx = float(self.env.agent.pos[0]); sz = float(self.env.agent.pos[2]); sd = float(self.env.agent.dir)
+        x0 = float(self.env.min_x); z0 = float(self.env.min_z)
+        s_key = (qpos(sx, x0), qpos(sz, z0), qdir(sd))
+        from collections import deque
+        Q = deque([s_key])
+        parent = {s_key: None}
+        parent_act = {}
+        nodes = 0
+        max_nodes = 20000
+        # Helper to reconstruct plan
+        def reconstruct(key):
+            seq = []
+            cur = key
+            while parent[cur] is not None:
+                seq.append(parent_act[cur])
+                cur = parent[cur]
+            seq.reverse()
+            return seq
+        while Q:
+            key = Q.popleft()
+            nodes += 1
+            if nodes > max_nodes:
+                break
+            gx, gz, hk = key
+            # Map back to pose
+            x = x0 + gx * step
+            z = z0 + gz * step
+            d = hk * turn_step
+            # Goal test in continuous coords
+            if is_goal_fn(x, z, d):
+                return reconstruct(key)
+            # Neighbors: turns
+            for act, nhk in ((a.turn_left, (hk + 1) % int(round(2 * math.pi / turn_step))),
+                             (a.turn_right, (hk - 1) % int(round(2 * math.pi / turn_step)))):
+                nkey = (gx, gz, nhk)
+                if nkey in parent:
+                    continue
+                parent[nkey] = key
+                parent_act[nkey] = act
+                Q.append(nkey)
+            # Forward
+            nd = d
+            nx = x + math.cos(nd) * step
+            nz = z - math.sin(nd) * step
+            # Bounds
+            if not (self.env.min_x <= nx <= self.env.max_x and self.env.min_z <= nz <= self.env.max_z):
+                continue
+            # Collision
+            if not self._forward_safe_from(x, z, nd, carrying):
+                continue
+            nkey = (qpos(nx, x0), qpos(nz, z0), qdir(nd))
+            if nkey in parent:
+                continue
+            parent[nkey] = key
+            parent_act[nkey] = a.move_forward
+            Q.append(nkey)
+        return None
+
+    def _choose_block(self) -> Optional[Box]:
+        blocks = [e for e in self.env.entities if isinstance(e, Box)]
+        if not blocks:
+            return None
+        return blocks[0] if len(blocks) == 1 else blocks[int(self.rng.integers(0, len(blocks)))]
+
+    def _choose_drop_target(self, carrying: Box) -> Optional[tuple]:
+        # Sample random empty locations
+        min_x = float(self.env.min_x + 1.0)
+        max_x = float(self.env.max_x - 1.0)
+        min_z = float(self.env.min_z + 1.0)
+        max_z = float(self.env.max_z - 1.0)
+        for _ in range(64):
+            x = float(self.rng.uniform(min_x, max_x))
+            z = float(self.rng.uniform(min_z, max_z))
+            # Check block footprint free
+            pos = np.array([x, 0.0, z], dtype=float)
+            if self.env.intersect(carrying, pos, carrying.radius):
+                continue
+            return (x, z)
+        return None
+
+    def action(self, step_idx: int) -> int:
+        a = self.env.actions
+        agent = self.env.agent
+
+        if self.phase == "select_block":
+            self.block = self._choose_block()
+            if self.block is None:
+                return a.pickup
+            self.phase = "plan_to_block"
+            return a.pickup
+
+        if self.phase == "plan_to_block":
+            b = self.block
+            assert b is not None
+            standoff = float(agent.radius + b.radius + 0.25 * self.fwd_step)
+            bx = float(b.pos[0]); bz = float(b.pos[2])
+            candidates = [
+                (bx - standoff, bz, 0.0),                 # West of block, face +X
+                (bx + standoff, bz, math.pi),             # East, face -X
+                (bx, bz - standoff, math.pi / 2.0),       # North, face +Z
+                (bx, bz + standoff, -math.pi / 2.0),      # South, face -Z
+            ]
+            for tx, tz, tdir in candidates:
+                # Try simple axis plan first
+                plan = self._build_axis_plan_from_current(tx, tz, tdir, None)
+                if not plan:
+                    # Fallback BFS with relaxed goal: same x or z as block (within 0.5*step) and dist <= 1.5, facing toward block
+                    def goal_fn(x, z, d):
+                        same_x = abs(x - bx) <= 0.5 * self.fwd_step
+                        same_z = abs(z - bz) <= 0.5 * self.fwd_step
+                        facing_ok = abs(((self._quantize(self._dir_to(bx, bz)) - self._quantize(d)) + math.pi) % (2*math.pi) - math.pi) <= (self.turn_step_rad * 0.5 + 1e-6)
+                        dist_ok = math.hypot(bx - x, bz - z) <= 1.5
+                        return (same_x or same_z) and facing_ok and dist_ok
+                    plan = self._bfs_plan_to_goal(goal_fn, None)
+                if plan:
+                    self.plan_actions = plan
+                    self.approach_pose = (tx, tz, tdir)
+                    self.phase = "move_to_block"
+                    return a.pickup
+            # If none feasible, rotate to change heading then retry next step
+            return a.turn_left
+
+        if self.phase == "move_to_block":
+            if self.plan_actions:
+                return int(self.plan_actions.pop(0))
+            # Reached approach pose; pickup next
+            self.phase = "pickup"
+            return a.pickup
+
+        if self.phase == "pickup":
+            self.phase = "plan_to_target"
+            return a.pickup
+
+        if self.phase == "plan_to_target":
+            carrying = agent.carrying
+            if carrying is None:
+                # If pickup failed yet, try again
+                return a.pickup
+            drop = self._choose_drop_target(carrying)
+            if drop is None:
+                return a.turn_right
+            tx, tz = drop
+            # Choose a cardinal facing so block drops at (tx,tz)
+            headings = [0.0, math.pi/2.0, math.pi, -math.pi/2.0]
+            for h in headings:
+                # Compute agent pose that will place block in front
+                d = float(agent.radius + carrying.radius + self.fwd_step) * 1.05
+                ax = tx - math.cos(h) * d
+                az = tz + math.sin(h) * d
+                plan = self._build_axis_plan_from_current(ax, az, h, carrying)
+                if plan:
+                    self.plan_actions = plan
+                    self.target_pos = (tx, tz)
+                    self.phase = "move_to_target"
+                    return a.pickup
+            return a.turn_right
+
+        if self.phase == "move_to_target":
+            if self.plan_actions:
+                return int(self.plan_actions.pop(0))
+            self.phase = "drop"
+            return a.pickup
+
+        if self.phase == "drop":
+            # Drop the block in front
+            self.phase = "select_block"
+            self.block = None
+            self.target_pos = None
+            return a.drop if agent.carrying is not None else a.pickup
+
         return a.pickup
+
 
 
 class EdgePlusPolicy:
@@ -584,12 +940,12 @@ class EdgePlusPolicy:
             if turn is not None:
                 return turn
             self.phase = "observe_edge"
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "observe_edge":
             if self.observe_remaining > 0:
                 self.observe_remaining -= 1
-                return a.pickup
+                return a.do_nothing
             # proceed to center route
             self.phase = "align_to_center"
 
@@ -599,7 +955,7 @@ class EdgePlusPolicy:
             if turn is not None:
                 return turn
             self.phase = "forward_to_center"
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "forward_to_center":
             dx, dz = (self.cx - ax), (self.cz - az)
@@ -608,14 +964,14 @@ class EdgePlusPolicy:
                 # snap to exact center and proceed to align toward next edge
                 self._set_agent_pose(self.cx, self.cz, agent.dir)
                 self.phase = "align_to_edge"
-                return a.pickup
+                return a.do_nothing
             # drive straight; if blocked by dynamic obstacle, wait
             fwd_step = float(self.env.max_forward_step)
             ahead_x = ax + math.cos(float(agent.dir)) * fwd_step
             ahead_z = az - math.sin(float(agent.dir)) * fwd_step
             if self._is_pos_free(ahead_x, ahead_z):
                 return a.move_forward
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "align_to_edge":
             if self.target_idx is None:
@@ -626,7 +982,7 @@ class EdgePlusPolicy:
             if turn is not None:
                 return turn
             self.phase = "forward_to_edge"
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "forward_to_edge":
             tx, tz = self.edge_points[self.target_idx]
@@ -639,16 +995,16 @@ class EdgePlusPolicy:
                 self.target_idx = None  # defer next choice to align_to_edge
                 self.phase = "align_inward"
                 self.observe_remaining = self.observe_steps
-                return a.pickup
+                return a.do_nothing
             fwd_step = float(self.env.max_forward_step)
             ahead_x = ax + math.cos(float(agent.dir)) * fwd_step
             ahead_z = az - math.sin(float(agent.dir)) * fwd_step
             if self._is_pos_free(ahead_x, ahead_z):
                 return a.move_forward
-            return a.pickup
+            return a.do_nothing
 
         # fallback
-        return a.pickup
+        return a.do_nothing
 
 
 class PeekabooMotionPolicy:
@@ -772,12 +1128,12 @@ class PeekabooMotionPolicy:
                 return turn
             self.phase = "observe_inward"
             self.observe_remaining = self.observe_inward_steps
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "observe_inward":
             if self.observe_remaining > 0:
                 self.observe_remaining -= 1
-                return a.pickup
+                return a.do_nothing
             self.phase = "align_outward"
 
         if self.phase == "align_outward":
@@ -788,12 +1144,12 @@ class PeekabooMotionPolicy:
                 return turn
             self.phase = "observe_outward"
             self.observe_remaining = self.observe_outward_steps
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "observe_outward":
             if self.observe_remaining > 0:
                 self.observe_remaining -= 1
-                return a.pickup
+                return a.do_nothing
             self.phase = "align_to_center"
 
         if self.phase == "align_to_center":
@@ -802,7 +1158,7 @@ class PeekabooMotionPolicy:
             if turn is not None:
                 return turn
             self.phase = "forward_to_center"
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "forward_to_center":
             dx, dz = (self.cx - ax), (self.cz - az)
@@ -810,13 +1166,13 @@ class PeekabooMotionPolicy:
             if dist <= self.reach_eps:
                 self._set_agent_pose(self.cx, self.cz, agent.dir)
                 self.phase = "align_to_edge"
-                return a.pickup
+                return a.do_nothing
             fwd_step = float(self.env.max_forward_step)
             ahead_x = ax + math.cos(float(agent.dir)) * fwd_step
             ahead_z = az - math.sin(float(agent.dir)) * fwd_step
             if self._is_pos_free(ahead_x, ahead_z):
                 return a.move_forward
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "align_to_edge":
             if self.target_idx is None:
@@ -827,7 +1183,7 @@ class PeekabooMotionPolicy:
             if turn is not None:
                 return turn
             self.phase = "forward_to_edge"
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "forward_to_edge":
             tx, tz = self.edge_points[self.target_idx]
@@ -839,15 +1195,15 @@ class PeekabooMotionPolicy:
                 self.target_idx = None
                 self.phase = "align_inward"
                 self.observe_remaining = self.observe_inward_steps
-                return a.pickup
+                return a.do_nothing
             fwd_step = float(self.env.max_forward_step)
             ahead_x = ax + math.cos(float(agent.dir)) * fwd_step
             ahead_z = az - math.sin(float(agent.dir)) * fwd_step
             if self._is_pos_free(ahead_x, ahead_z):
                 return a.move_forward
-            return a.pickup
+            return a.do_nothing
 
-        return a.pickup
+        return a.do_nothing
 
 class PeeakbooPolicy:
     """
@@ -946,14 +1302,14 @@ class PeeakbooPolicy:
                 return turn
             self.phase = "observe_inward"
             self.observe_remaining = self.observe_steps
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "observe_inward":
             if self.observe_remaining > 0:
                 self.observe_remaining -= 1
-                return a.pickup
+                return a.do_nothing
             self.phase = "align_outward"
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "align_outward":
             turn = self._turn_toward(outward_dir)
@@ -961,16 +1317,16 @@ class PeeakbooPolicy:
                 return turn
             self.phase = "observe_outward"
             self.observe_remaining = self.observe_steps
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "observe_outward":
             if self.observe_remaining > 0:
                 self.observe_remaining -= 1
-                return a.pickup
+                return a.do_nothing
             self.phase = "align_inward"
-            return a.pickup
+            return a.do_nothing
 
-        return a.pickup
+        return a.do_nothing
 
 class BiasedWalkV2Policy:
     """
@@ -1038,8 +1394,42 @@ class BiasedWalkV2Policy:
     def _forward_blocked(self) -> bool:
         agent = self.env.agent
         fwd_step = float(self.env.max_forward_step)
-        next_pos = self._ahead_pos(agent.pos, float(agent.dir), fwd_step)
-        return bool(self.env.intersect(agent, next_pos, agent.radius))
+        # Consider possible lateral drifts that will be sampled at step-time.
+        # We don't sample RNG here (to avoid advancing it); instead, we conservatively
+        # require forward to be free for a small set of representative drift values.
+        try:
+            max_drift = float(abs(self.env.params.get_max("forward_drift")))
+        except Exception:
+            max_drift = 0.0
+        # Representative drift candidates: center and extremes
+        drift_candidates = [0.0]
+        if max_drift > 0.0:
+            drift_candidates.extend([-max_drift, max_drift])
+        # Precompute heading vectors
+        dir_rad = float(agent.dir)
+        dx = math.cos(dir_rad)
+        dz = -math.sin(dir_rad)
+        # Right vector in XZ plane (rotate +90deg from forward)
+        rx = -dz
+        rz = dx
+        for drift in drift_candidates:
+            next_pos = agent.pos.copy()
+            next_pos[0] += dx * fwd_step + rx * drift
+            next_pos[2] += dz * fwd_step + rz * drift
+            hit = self.env.intersect(agent, next_pos, agent.radius)
+            if hit:
+                return True
+            # If carrying an entity, ensure carry position would also be collision-free
+            carrying = getattr(agent, "carrying", None)
+            if carrying is not None:
+                try:
+                    next_carry = self.env._get_carry_pos(next_pos, carrying)
+                    if self.env.intersect(carrying, next_carry, carrying.radius):
+                        return True
+                except Exception:
+                    # If for any reason we can't compute carry pose, be conservative
+                    return True
+        return False
 
     def _log(self, msg: str):
         if not self.debug:
@@ -1078,7 +1468,7 @@ class BiasedWalkV2Policy:
                 return a.move_forward
             self.phase = "look_align"
             self.look_remaining = self.observe_steps
-            return a.pickup
+            return a.do_nothing
 
         # 1) Look: face the center and pause
         if self.phase == "look_align":
@@ -1090,17 +1480,17 @@ class BiasedWalkV2Policy:
             self.phase = "look_observe"
             self.look_remaining = self.observe_steps
             self._log("[BWv2] action=NOOP enter look_observe")
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "look_observe":
             if self.look_remaining > 0:
                 self.look_remaining -= 1
-                return a.pickup
+                return a.do_nothing
             # choose crawl side and align along wall (left/right relative to inward)
             self.crawl_sign = +1 if float(self.rng.random()) < 0.5 else -1
             self.phase = "wall_crawl_align"
             self._log("[BWv2] action=NOOP enter wall_crawl_align")
-            return a.pickup
+            return a.do_nothing
 
         # 2) Wall crawl
         if self.phase == "wall_crawl_align":
@@ -1110,14 +1500,14 @@ class BiasedWalkV2Policy:
             if not self._forward_blocked():
                 self.phase = "wall_crawl_move"
                 self._log("[BWv2] forward free in wall_crawl_align -> enter wall_crawl_move")
-                return a.pickup
+                return a.do_nothing
             turn = self._turn_toward(desired)
             if turn is not None:
                 self._log(f"[BWv2] action=turn ({'L' if turn==a.turn_left else 'R'}) in wall_crawl_align")
                 return turn
             self.phase = "wall_crawl_move"
             self._log("[BWv2] action=NOOP enter wall_crawl_move")
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "wall_crawl_move":
             # With forward_prob move along the wall; if blocked, turn to keep hugging
@@ -1145,7 +1535,7 @@ class BiasedWalkV2Policy:
             self.target_dir = self._dir_to(self.cx, self.cz)
             self.phase = "walk_room_align"
             self._log("[BWv2] action=NOOP enter walk_room_align")
-            return a.pickup
+            return a.do_nothing
 
         # 3) Walk in room
         if self.phase == "walk_room_align":
@@ -1155,7 +1545,7 @@ class BiasedWalkV2Policy:
                 return turn
             self.phase = "walk_room_move"
             self._log("[BWv2] action=NOOP enter walk_room_move")
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "walk_room_move":
             if float(self.rng.random()) < self.forward_prob and not self._forward_blocked():
@@ -1167,7 +1557,7 @@ class BiasedWalkV2Policy:
             self.target_dir = self._wrap(curr_dir + turn_sign * self.turn_step_rad)
             self.phase = "go_to_wall_align"
             self._log("[BWv2] action=NOOP enter go_to_wall_align")
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "go_to_wall_align":
             turn = self._turn_toward(self.target_dir)
@@ -1176,7 +1566,7 @@ class BiasedWalkV2Policy:
                 return turn
             self.phase = "go_to_wall_move"
             self._log("[BWv2] action=NOOP enter go_to_wall_move")
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "go_to_wall_move":
             if not self._forward_blocked():
@@ -1186,7 +1576,7 @@ class BiasedWalkV2Policy:
             self.target_dir = self._wrap(float(agent.dir) + math.pi)
             self.phase = "turn_around_align"
             self._log("[BWv2] action=NOOP enter turn_around_align")
-            return a.pickup
+            return a.do_nothing
 
         if self.phase == "turn_around_align":
             turn = self._turn_toward(self.target_dir)
@@ -1196,10 +1586,10 @@ class BiasedWalkV2Policy:
             self.phase = "look_align"
             self.look_remaining = self.observe_steps
             self._log("[BWv2] action=NOOP enter look_align")
-            return a.pickup
+            return a.do_nothing
 
         # fallback
-        return a.pickup
+        return a.do_nothing
 
 def _wrap_angle(a: np.ndarray) -> np.ndarray:
     return (a + np.pi) % (2 * np.pi) - np.pi
@@ -1261,6 +1651,8 @@ def run_rollout(
         )
     elif policy_name == "peeakboo":
         policy = PeeakbooPolicy(env=env, observe_steps=observe_steps)
+    elif policy_name == "blockmover":
+        policy = BlockMoverPolicy(env=env)
     else:
         policy = BiasedRandomPolicy(env=env, **policy_kwargs)
 
@@ -1488,6 +1880,11 @@ def main():
     # parser.add_argument("--floor-tex", type=str, default="ceiling_tile_noborder", help="floor texture name (see miniworld/textures), default white")
     parser.add_argument("--wall-tex", type=str, default="white", help="wall texture name, default white")
     parser.add_argument("--ceil-tex", type=str, default="ceiling_tile_noborder", help="ceiling texture name, default white")
+    parser.add_argument("--box-tex", type=str, default=None, help="box texture name (e.g., 'airduct_grate'); default none for solid color")
+    parser.add_argument("--randomize-box-tex", action="store_true", help="assign a random texture per box from a default pool")
+    parser.add_argument("--randomize-wall-tex", action="store_true", help="randomize wall texture from default pool ['brick_wall','drywall','wood']")
+    parser.add_argument("--randomize-floor-tex", action="store_true", help="randomize floor texture from default pool ['cardboard','grass','concrete']")
+    parser.add_argument("--box-and-ball", action="store_true", help="randomly spawn boxes or tall textured balls (height follows block-height)")
     # parser.add_argument("--ceil-tex", type=str, default="wood", help="ceiling texture name, default white")
     # Block size controls (MovingBlockWorld): uniform footprint and/or height
     parser.add_argument("--block-size-xy", type=float, default=None, help="if set, use this x/z size (meters) for all blocks")
@@ -1507,7 +1904,7 @@ def main():
     )
 
     # Policy selection and knobs
-    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "biased_walk_v2", "back_and_forth", "center_rotate", "do_nothing", "edge_plus", "peeakboo", "peekaboo_motion"], help="which control policy to use")
+    parser.add_argument("--policy", type=str, default="biased_random", choices=["biased_random", "biased_walk_v2", "back_and_forth", "center_rotate", "do_nothing", "edge_plus", "peeakboo", "peekaboo_motion", "blockmover"], help="which control policy to use")
     parser.add_argument("--forward-prob", type=float, default=0.8, help="biased_random: probability of moving forward when safe")
     parser.add_argument("--turn-left-weight", type=float, default=1.0, help="biased_random: relative weight for choosing left turns")
     parser.add_argument("--turn-right-weight", type=float, default=1.0, help="biased_random: relative weight for choosing right turns")

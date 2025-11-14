@@ -8,11 +8,15 @@ from pyglet.gl import (
     GL_QUADS,
     GL_TEXTURE_2D,
     GL_TRIANGLES,
+    GL_TEXTURE_ENV,
+    GL_TEXTURE_ENV_MODE,
+    GL_MODULATE,
     glBegin,
     glColor3f,
     glDisable,
     glEnable,
     glEnd,
+    glTexEnvi,
     glNormal3f,
     glPopMatrix,
     glPushMatrix,
@@ -385,10 +389,10 @@ class TextFrame(Entity):
 
 class Box(Entity):
     """
-    Colored box object
+    Colored box object (optionally textured)
     """
 
-    def __init__(self, color, size=0.8):
+    def __init__(self, color, size=0.8, texture=None):
         super().__init__()
 
         if type(size) is int or type(size) is float:
@@ -398,6 +402,9 @@ class Box(Entity):
 
         self.color = color
         self.size = size
+        # Optional texture name (e.g., 'airduct_grate')
+        # None means no texture; render as solid color
+        self.tex_name = str(texture) if texture is not None else None
 
         self.radius = math.sqrt(sx * sx + sz * sz) / 2
         self.height = sy
@@ -413,23 +420,92 @@ class Box(Entity):
 
         sx, sy, sz = self.size
 
-        glDisable(GL_TEXTURE_2D)
-        glColor3f(*self.color_vec)
-
         glPushMatrix()
         glTranslatef(*self.pos)
         glRotatef(self.dir * (180 / math.pi), 0, 1, 0)
 
-        drawBox(
-            x_min=-sx / 2,
-            x_max=+sx / 2,
-            y_min=0,
-            y_max=sy,
-            z_min=-sz / 2,
-            z_max=+sz / 2,
-        )
+        if self.tex_name is None:
+            # No texture: draw as solid colored box (legacy behavior)
+            glDisable(GL_TEXTURE_2D)
+            glColor3f(*self.color_vec)
+            drawBox(
+                x_min=-sx / 2,
+                x_max=+sx / 2,
+                y_min=0,
+                y_max=sy,
+                z_min=-sz / 2,
+                z_max=+sz / 2,
+            )
+            glPopMatrix()
+            return
+
+        # Textured path
+        tex = Texture.get(self.tex_name)
+        glEnable(GL_TEXTURE_2D)
+        tex.bind()
+        # Modulate texture with box color (tints the texture)
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+        glColor3f(*self.color_vec)
+
+        x_min = -sx / 2
+        x_max = +sx / 2
+        y_min = 0
+        y_max = sy
+        z_min = -sz / 2
+        z_max = +sz / 2
+
+        # Simple per-face UVs (TODO: improve UV scaling/tiling by size)
+        u0, v0 = 0.0, 0.0
+        u1, v1 = 1.0, 1.0
+
+        glBegin(GL_QUADS)
+
+        # +Z face
+        glNormal3f(0, 0, 1)
+        glTexCoord2f(u1, v1); glVertex3f(x_max, y_max, z_max)
+        glTexCoord2f(u0, v1); glVertex3f(x_min, y_max, z_max)
+        glTexCoord2f(u0, v0); glVertex3f(x_min, y_min, z_max)
+        glTexCoord2f(u1, v0); glVertex3f(x_max, y_min, z_max)
+
+        # -Z face
+        glNormal3f(0, 0, -1)
+        glTexCoord2f(u1, v1); glVertex3f(x_min, y_max, z_min)
+        glTexCoord2f(u0, v1); glVertex3f(x_max, y_max, z_min)
+        glTexCoord2f(u0, v0); glVertex3f(x_max, y_min, z_min)
+        glTexCoord2f(u1, v0); glVertex3f(x_min, y_min, z_min)
+
+        # -X face
+        glNormal3f(-1, 0, 0)
+        glTexCoord2f(u1, v1); glVertex3f(x_min, y_max, z_max)
+        glTexCoord2f(u0, v1); glVertex3f(x_min, y_max, z_min)
+        glTexCoord2f(u0, v0); glVertex3f(x_min, y_min, z_min)
+        glTexCoord2f(u1, v0); glVertex3f(x_min, y_min, z_max)
+
+        # +X face
+        glNormal3f(1, 0, 0)
+        glTexCoord2f(u1, v1); glVertex3f(x_max, y_max, z_min)
+        glTexCoord2f(u0, v1); glVertex3f(x_max, y_max, z_max)
+        glTexCoord2f(u0, v0); glVertex3f(x_max, y_min, z_max)
+        glTexCoord2f(u1, v0); glVertex3f(x_max, y_min, z_min)
+
+        # +Y face (top)
+        glNormal3f(0, 1, 0)
+        glTexCoord2f(u1, v1); glVertex3f(x_max, y_max, z_max)
+        glTexCoord2f(u0, v1); glVertex3f(x_max, y_max, z_min)
+        glTexCoord2f(u0, v0); glVertex3f(x_min, y_max, z_min)
+        glTexCoord2f(u1, v0); glVertex3f(x_min, y_max, z_max)
+
+        # -Y face (bottom)
+        glNormal3f(0, -1, 0)
+        glTexCoord2f(u1, v1); glVertex3f(x_max, y_min, z_min)
+        glTexCoord2f(u0, v1); glVertex3f(x_max, y_min, z_max)
+        glTexCoord2f(u0, v0); glVertex3f(x_min, y_min, z_max)
+        glTexCoord2f(u1, v0); glVertex3f(x_min, y_min, z_min)
+
+        glEnd()
 
         glPopMatrix()
+        glDisable(GL_TEXTURE_2D)
 
 
 class Key(MeshEnt):
