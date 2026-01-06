@@ -1,187 +1,83 @@
 #!/usr/bin/env python3
 
 """
-Generate rollout videos (RGB and depth) and actions for a simple agent policy.
+scripts.generate_videos
 
-Example usage (mirrors manual_control flags):
+Generate MiniWorld rollout videos (RGB + depth) plus action/trajectory metadata for a simple
+agent policy. Intended for quick single-rollout generation and debugging.
 
+Basic usage:
+  python -m scripts.generate_videos \
+    --env-name MiniWorld-MovingBlockWorld-v0 \
+    --steps 300 --out-prefix ./out/run1
+
+Outputs (written using <out-prefix>):
+  - <out-prefix>_rgb.mp4          RGB rollout video (T frames)
+  - <out-prefix>_depth.pt         Raw depth tensor float32, shape (T,H,W,1)
+  - <out-prefix>_actions.pt       Dict with:
+        actions (T,), agent_pos (T,3), delta_xz (T,2), delta_dir (T,), agent_dir (T,)
+
+Optional debug/map outputs:
+  - --debug-join                  Saves <out-prefix>_debug.mp4 (RGB | top-view side-by-side)
+  - --output-2d-map               Saves <out-prefix>_map_2d.mp4 and stores top_view_scale in actions.pt
+
+Key flag groups:
+  Rendering:
+    --render-width/--render-height     RGB video resolution (env.render())
+    --obs-width/--obs-height           Depth/obs buffer resolution
+
+  Episode / environment:
+    --room-size, --spawn-wall-buffer, --no-time-limit, --domain-rand, --heading-zero,
+    --agent-center-start
+
+  Discrete motion / camera:
+    --turn-step-deg, --forward-step, --cam-fov-y, --even-lighting
+
+  Blocks / dynamics (MovingBlockWorld):
+    --grid-mode + --grid-vel-min/max [--grid-cardinal-only], --blocks-static, --num-blocks,
+    --num-blocks-min/max, --ensure-base-palette, --block-size-xy, --block-height,
+    overlap/orientation flags (e.g., --box-allow-overlap, --agent-box-allow-overlap, --box-random-orientation)
+
+  Textures:
+    --floor-tex, --wall-tex, --ceil-tex, --box-tex, plus randomizers:
+    --randomize-(wall|floor|box)-tex, --box-and-ball
+
+Policies (--policy):
+  biased_random (default): forward-biased random walk with wall avoidance knobs:
+    --forward-prob, --turn-left-weight, --turn-right-weight, --wall-buffer,
+    --avoid-turning-into-walls, --lookahead-mult
+  biased_walk_v2: wall-biased exploration with periodic "look" toward center (uses --forward-prob, --observe-steps)
+  back_and_forth: straight segments then turn around (uses --segment-len)
+  center_rotate: random left/right/NOOP (NOOP encoded as action id 4)
+  do_nothing: always NOOP (action id 4)
+  edge_plus: cycles between edge centers and pauses to observe (uses --observe-steps)
+  peeakboo / peekaboo_motion: inward/outward observation cycles (uses --observe-steps / --observe-inward-steps / --observe-outward-steps)
+  blockmover: pick up and relocate blocks (forces collisions on)
+
+Headless rendering (servers):
+  Set MINIWORLD_HEADLESS=1 to force pyglet + software GL headless mode:
+    MINIWORLD_HEADLESS=1 python -m scripts.generate_videos ...
+
+Notes:
+  Dataset/multi-generation flags (--dataset-root, --num-videos, etc.) are DEPRECATED in this
+  script; use scripts.generate_videos_batch for large-scale generation.
+
+Command to generate one sample from the textured training set used in the FloWM paper: 
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
-  --box-allow-overlap --agent-box-allow-overlap \
-  --box-random-orientation --no-time-limit \
-  --steps 300 --out-prefix ./out/run1
-
-Outputs:
-  - <out-prefix>_rgb.mp4
-  - <out-prefix>_depth.mp4
-  - <out-prefix>_actions.pt
-  
-  
-command 3pm sep 10
-single generation (static, center rotate):
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --forward-prob 0.90 --wall-buffer 0.0 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
   --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 300 --out-prefix ./out/run_move --debug-join --output-2d-map --room-size 7 \
-  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy do_nothing --cam-fov-y 90
-
-
-single generation (dynamic, edge plus agent): (edge plus)
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 300 --out-prefix ./out/edge_plus_run --debug-join --output-2d-map --room-size 16 \
+  --steps 500 --output-2d-map --room-size 16 \
   --block-size-xy 0.7 --block-height 1.5 \
   --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
-  --policy edge_plus --observe-steps 5 --cam-fov-y 60
-  
-  
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 500 --out-prefix ./out/biased_random_fwd --debug-join --output-2d-map --room-size 16 \
-  --block-size-xy 0.7 --block-height 1.5 \
-  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
-  --policy biased_random --forward-prob 0.9 --cam-fov-y 60
-
-
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 500 --out-prefix ./out/biased_walk_v2 --debug-join --output-2d-map --room-size 16 \
-  --block-size-xy 0.7 --block-height 1.5 \
-  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
-  --policy biased_walk_v2 --forward-prob 0.9 --cam-fov-y 60 --forward-prob 0.9
-  
-peekaboo w motion
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 500 --out-prefix ./out/peekaboo_motion --debug-join --output-2d-map --room-size 16 \
-  --block-size-xy 0.7 --block-height 1.5 \
-  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
-  --policy peekaboo_motion --observe-inward-steps 7 --observe-outward-steps 28 --cam-fov-y 60
-  
-  
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 500 --out-prefix ./out/static_v2 --debug-join --steps 500 --output-2d-map --room-size 16 \
-  --block-size-xy 0.7 --block-height 1.5 \
-  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
-  --policy biased_walk_v2 --forward-prob 0.92 --cam-fov-y 60 \
-  --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette --blocks-static
-
-
-Test with bouncing blocks and different texture on the walls etc
-
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 100 --output-2d-map --room-size 12 \
-  --block-size-xy 0.7 --block-height 1.5 \
-  --grid-cardinal-only \
   --policy biased_walk_v2 --forward-prob 0.90 --cam-fov-y 60 \
-  --num-blocks-min 6 --num-blocks-max 8 --ensure-base-palette \
-  --out-prefix ./out/bounce_tex --debug-join \
+  --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette \
+  --out-prefix ./out/tex --debug-join \
   --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball
   
-  --wall-tex wood --floor-tex cardboard --randomize-box-tex
-
-
-# BLOCKMOVER
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
-  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
-  --steps 100 --output-2d-map --room-size 12 \
-  --block-size-xy 0.7 --block-height 1.5 \
-  --grid-cardinal-only --blocks-static \
-  --policy blockmover --forward-prob 0.92 --cam-fov-y 60 \
-  --num-blocks-min 1 --num-blocks-max 1 --ensure-base-palette \
-  --out-prefix ./out/blockmover --debug-join
-  
-  \
-  --wall-tex wood --floor-tex cardboard
-
-
-single static generation
-add --blocks-static
-  
-multi generation: 
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
-  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 16 --no-time-limit \
-  --dataset-root ./out/multi_gen --num-videos 20000 --block-size 256 --num-processes 64
-  
-# IMPORTANT NOTE FOR HEADLESS MODE RENDERING ON SERVERS: 
-run like: 
-MINIWORLD_HEADLESS=1 python -m scripts.generate_videos ... 
-
-# NOTE: extra vae training samples generated like this: 
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --policy biased_random --forward-prob 0.9 --wall-buffer 0 --avoid-turning-into-walls --agent-box-allow-overlap \
-  --turn-step-deg 45 --forward-step 0.5 \
-  --grid-vel-min -1 --grid-vel-max 1 --box-random-orientation \
-  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 12 --no-time-limit \
-  --dataset-root ./out/blockworld_futureproof --num-videos 20000 --block-size 256 --num-processes 64
-
-import torch, torchvision.io as io; vid_depth = io.read_video("/Users/hansen/Desktop/ucsd/Miniworld/out/run_move_rgb.mp4", pts_unit="sec")[0].permute(0,3,1,2).to(torch.float32).div_(255)
-
-# static generation for dfot map experiment 
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -0 --grid-vel-max 0 --blocks-static \
-  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 16 --no-time-limit --output-2d-map \
-  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_training_w_map --num-videos 20000 --block-size 256 --num-processes 32
-
-# static generation center rotate with map
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -0 --grid-vel-max 0 \
-  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 10 --no-time-limit --output-2d-map \
-  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --cam-fov-y 90 \
-  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_center_rotate_training --num-videos 20000 --block-size 256 --num-processes 32
-python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap --box-allow-overlap \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -0 --grid-vel-max 0 \
-  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 10 --no-time-limit --output-2d-map \
-  --blocks-static --block-size-xy 0.7 --block-height 1.5 --agent-center-start --policy center_rotate --cam-fov-y 90 \
-  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/static_center_rotate_validation --num-videos 1000 --block-size 64 --num-processes 32
 """
+
 
 import argparse
 import math

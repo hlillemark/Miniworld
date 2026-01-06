@@ -42,41 +42,70 @@ python3 -m pip install -e ".[dataset]"
 
 If you run into any problems, please take a look at the [troubleshooting guide](docs/content/troubleshooting.md).
 
-## 3D Dynamic Blockworld Usage
+## 3D Dynamic Blockworld Quick Usage:
 
-This section describes the dataset generation for the 3D Dynamic Blockworld dataset used in the [Flow Equivariant World Models paper](https://flowequivariantworldmodels.github.io). Static, Dynamic, and different agent options can be configured. Example commands are available below: 
+This section describes the dataset generation for the 3D Dynamic Blockworld dataset used in the [Flow Equivariant World Models paper](https://flowequivariantworldmodels.github.io). Static, Dynamic, Textures, and different agent options can be configured. Example commands are available below: 
 
-To generate one example video of blockworld, you can use the following command
+Command to generate one sample from the textured training set used in the FloWM paper: 
 ```console 
 python -m scripts.generate_videos \
   --env-name MiniWorld-MovingBlockWorld-v0 \
-  --policy biased_random --forward-prob 0.90 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
-  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 300 --out-prefix ./out/run_move --debug --room-size 16
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy biased_walk_v2 --forward-prob 0.90 --cam-fov-y 60 \
+  --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette \
+  --out-prefix ./out/tex --debug-join \
+  --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball
 ```
 
-To run parallel dataset generation, set the settings from this command:
+To run parallel dataset generation, set the settings from this command. This will generate the textured validation set used in the FloWM paper:
 ```console 
-python -m scripts.generate_videos \
+python -m scripts.generate_videos_batch \
   --env-name MiniWorld-MovingBlockWorld-v0 \
-  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
+  --dataset-root /data/hansen/projects/wm-memory/data/blockworld/tex_validation \
+  --num-videos 1000 --block-size 64 --num-processes 48 \
+  -- \
   --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
   --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 16 \
-  --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
-
-xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python -m scripts.generate_videos \
-  --env-name MiniWorld-MovingBlockWorld-v0 \
-  --policy biased_random --forward-prob 0.9 --wall-buffer 0.5 --avoid-turning-into-walls --agent-box-allow-overlap \
-  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
-  --grid-mode --grid-vel-min -1 --grid-vel-max 1 \
-  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
-  --steps 500 --room-size 16 \
-  --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy biased_walk_v2 --forward-prob 0.90 --cam-fov-y 60 \
+  --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette \
+  --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball
 ```
+
+## 3D Dynamic Blockworld Details:
+At each timestep, the agent makes an action and the blocks update according to the velocity they were initialized with. The agent is controlled by the policy and various parameters related to setting options for that policy. 
+
+#### Action convention
+For the environment used, the following discrete actions are used and stored in the metadata `<out_prefix>_actions.pt` file. They are stored under `actions` after loading the `.pt` file. The position and viewing direction are also stored in the `_actions.pt` file. 
+- turn_left: 0
+- turn_right: 1
+- move_forward: 2
+- move_back: 3 (not used)
+- do_nothing: 4 (added, not in the original miniworld env)
+- pick_up: 5 (not used)
+- drop: 6 (not used)
+
+#### Important configuration tags
+Some notable configuration tags for dataset generation are listed below:
+- steps: number of environment steps to record
+- policy: name of the policy to use
+- randomize-wall-tex, randomize-floor-tex, randomize-box-tex: whether or not to use randomized textures for dataset generation
+- box-and-ball: whether to spawn both boxes and balls instead of just boxes. 
+
+
+#### Important parallel generation tags
+Some notable configuration options for parallel dataset generation:
+- num-videos: number of videos to generate
+- block-size: items per block directory
+- num-processes: number of parallel processes to spawn
 
 ## Original Miniworld Usage
 
@@ -114,11 +143,13 @@ xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" pytho
 To cite this project please use:
 
 ```bibtex
-@article{MinigridMiniworld23,
-  author       = {Maxime Chevalier-Boisvert and Bolun Dai and Mark Towers and Rodrigo de Lazcano and Lucas Willems and Salem Lahlou and Suman Pal and Pablo Samuel Castro and Jordan Terry},
-  title        = {Minigrid \& Miniworld: Modular \& Customizable Reinforcement Learning Environments for Goal-Oriented Tasks},
-  journal      = {CoRR},
-  volume       = {abs/2306.13831},
-  year         = {2023},
-}
+@misc{lillemark2026flowequivariantworldmodels,
+    title={Flow Equivariant World Models: Memory for Partially Observed Dynamic Environments}, 
+    author={Hansen Jin Lillemark and Benhao Huang and Fangneng Zhan and Yilun Du and Thomas Anderson Keller},
+    year={2026},
+    eprint={2601.01075},
+    archivePrefix={arXiv},
+    primaryClass={cs.LG},
+    url={https://arxiv.org/abs/2601.01075}, 
+  }
 ```

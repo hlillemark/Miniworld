@@ -50,6 +50,7 @@ For simplicity, actions are discrete. The default available actions are:
 - `turn_right`
 - `move_forward`
 - `move_back`
+- `do_nothing`
 - `pickup` (pick up an object in front of the agent)
 - `drop` (drop an object being carried)
 - `toggle` (toggle an item/entity to perform some function)
