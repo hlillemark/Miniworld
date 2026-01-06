@@ -32,8 +32,8 @@ MiniWorld can be seen as a simpler alternative to VizDoom or DMLab. It is writte
 3D Dynamic Blockworld uses Miniworld as the simulator for partially observed dynamic
 environment simulation. Some examples of the dataset:
 <p align="center">
-  <img src="images/blockworld_vis_1.jpg" width="260" alt="Blockworld Vis 1" style="margin-right: 12px;">
-  <img src="images/blockworld_vis_2.jpg" width="260" alt="Blockworld Vis 2">
+  <img src="images/blockworld_vis_1.png" width="260" alt="Blockworld Vis 1" style="margin-right: 12px;">
+  <img src="images/blockworld_vis_2.png" width="260" alt="Blockworld Vis 2">
 </p>
 
 ## Installation
