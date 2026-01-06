@@ -2,7 +2,7 @@
     <img src="https://raw.githubusercontent.com/Farama-Foundation/Miniworld/master/miniworld-text.png" width="500px"/>
 </p>
 
-**See the instructions after the Installation for the [3D Dynamic Blockworld dataset generation instructions](#3d-dynamic-blockworld-usage), used in the paper [Flow Equivariant World Models](https://flowequivariantworldmodels.github.io). This repository is based off Miniworld, see the link [here](https://github.com/Farama-Foundation/Miniworld) for more information on the original repo.**
+**See the instructions after the Installation for the [3D Dynamic Blockworld dataset generation instructions](#3d-dynamic-blockworld-usage), used in the paper [Flow Equivariant World Models](https://flowequivariantworldmodels.github.io). The frozen code for that paper is available [at this branch](https://github.com/hlillemark/Miniworld/tree/flowm_release). This repository is based off Miniworld, see the link [here](https://github.com/Farama-Foundation/Miniworld) for more information on the original repo.**
 
 Contents:
 - [Introduction](#introduction)
