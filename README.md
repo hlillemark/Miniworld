@@ -13,7 +13,7 @@ Contents:
 - [Miniworld Design and Customization](https://miniworld.farama.org/content/design/)
 - [Troubleshooting](https://miniworld.farama.org/content/troubleshooting/)
 
-## Introduction
+<!-- ## Introduction
 
 MiniWorld is a minimalistic 3D interior environment simulator for reinforcement
 learning &amp; robotics research. It can be used to simulate environments with
@@ -21,11 +21,19 @@ rooms, doors, hallways and various objects (eg: office and home environments, ma
 MiniWorld can be seen as a simpler alternative to VizDoom or DMLab. It is written
 100% in Python and designed to be easily modified or extended by students.
 
-<!-- TODO: put here side by side of three textures for our blockworld env. -->
 <p align="center">
     <img src="images/maze_top_view.jpg" width=260 alt="Figure of Maze environment from top view">
     <img src="images/sidewalk_0.jpg" width=260 alt="Figure of Sidewalk environment">
     <img src="images/collecthealth_0.jpg" width=260 alt="Figure of Collect Health environment">
+</p> -->
+
+## Introduction
+
+3D Dynamic Blockworld uses Miniworld as the simulator for partially observed dynamic
+environment simulation. Some examples of the dataset:
+<p align="center">
+  <img src="images/blockworld_vis_1.jpg" width="260" alt="Blockworld Vis 1" style="margin-right: 12px;">
+  <img src="images/blockworld_vis_2.jpg" width="260" alt="Blockworld Vis 2">
 </p>
 
 ## Installation
@@ -79,6 +87,21 @@ python -m scripts.generate_videos_batch \
   --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette \
   --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball
 ```
+
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /Users/hansen/Desktop/ucsd/Miniworld/out/tex_validation \
+  --num-videos 64 --block-size 4 --num-processes 16 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 256 --render-height 256 --obs-width 256 --obs-height 256 \
+  --steps 500 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy biased_walk_v2 --forward-prob 0.90 --cam-fov-y 60 \
+  --num-blocks-min 6 --num-blocks-max 10 --ensure-base-palette \
+  --randomize-wall-tex --randomize-floor-tex --randomize-box-tex --box-and-ball --debug-join
 
 ## 3D Dynamic Blockworld Details:
 At each timestep, the agent makes an action and the blocks update according to the velocity they were initialized with. The agent is controlled by the policy and various parameters related to setting options for that policy. 
