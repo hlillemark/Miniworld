@@ -2,16 +2,15 @@
     <img src="https://raw.githubusercontent.com/Farama-Foundation/Miniworld/master/miniworld-text.png" width="500px"/>
 </p>
 
-**Aug 11, 2025: This project has been deprecated due to a lack of wide spread community use, and is no longer planned to receive any additional updates or support.**
-
-[![Build Status](https://travis-ci.org/maximecb/gym-miniworld.svg?branch=master)](https://travis-ci.org/maximecb/gym-miniworld)
+**See the instructions after the Installation for the [3D Dynamic Blockworld dataset generation instructions](#3d-dynamic-blockworld-usage), used in the paper [Flow Equivariant World Models](https://flowequivariantworldmodels.github.io). This repository is based off Miniworld, see the link [here](https://github.com/Farama-Foundation/Miniworld) for more information on the original repo.**
 
 Contents:
 - [Introduction](#introduction)
 - [Installation](#installation)
-- [Usage](#usage)
-- [Environments](https://miniworld.farama.org/content/env_list/)
-- [Design and Customization](https://miniworld.farama.org/content/design/)
+- [3D Dynamic Blockworld Generation](#3d-dynamic-blockworld-usage)
+- [Original Miniworld Usage](#original-miniworld-usage)
+- [Other Miniworld Environments](https://miniworld.farama.org/content/env_list/)
+- [Miniworld Design and Customization](https://miniworld.farama.org/content/design/)
 - [Troubleshooting](https://miniworld.farama.org/content/troubleshooting/)
 
 ## Introduction
@@ -22,71 +21,30 @@ rooms, doors, hallways and various objects (eg: office and home environments, ma
 MiniWorld can be seen as a simpler alternative to VizDoom or DMLab. It is written
 100% in Python and designed to be easily modified or extended by students.
 
+<!-- TODO: put here side by side of three textures for our blockworld env. -->
 <p align="center">
     <img src="images/maze_top_view.jpg" width=260 alt="Figure of Maze environment from top view">
     <img src="images/sidewalk_0.jpg" width=260 alt="Figure of Sidewalk environment">
     <img src="images/collecthealth_0.jpg" width=260 alt="Figure of Collect Health environment">
 </p>
 
-<!-- Features:
-- Few dependencies, less likely to break, easy to install
-- Easy to create your own levels, or modify existing ones
-- Good performance, high frame rate, support for multiple processes
-- Lightweight, small download, low memory requirements
-- Provided under a permissive MIT license
-- Comes with a variety of free 3D models and textures
-- Fully observable [top-down/overhead view](images/maze_top_view.jpg) available
-- [Domain randomization](https://blog.openai.com/generalizing-from-simulation/) support, for sim-to-real transfer
-- Ability to [display alphanumeric strings](images/textframe.jpg) on walls
-- Ability to produce depth maps matching camera images (RGB-D)
-
-Limitations:
-- Graphics are basic, nowhere near photorealism
-- Physics are very basic, not sufficient for robot arms or manipulation
-
-List of publications & submissions using MiniWorld (please open a pull request to add missing entries):
-- [Towards real-world navigation with deep differentiable planners](https://arxiv.org/abs/2108.05713) (VGG, Oxford, CVPR 2022)
-- [Decoupling Exploration and Exploitation for Meta-Reinforcement Learning without Sacrifices](https://arxiv.org/abs/2008.02790) (Stanford University, ICML 2021)
-- [Rank the Episodes: A Simple Approach for Exploration in Procedurally-Generated Environments](https://openreview.net/forum?id=MtEE0CktZht) (Texas A&M University, Kuai Inc., ICLR 2021)
-- [DeepAveragers: Offline Reinforcement Learning by Solving Derived Non-Parametric MDPs](https://arxiv.org/abs/2010.08891) (NeurIPS Offline RL Workshop, Oct 2020)
-- [Pre-trained Word Embeddings for Goal-conditional Transfer Learning in Reinforcement Learning](https://arxiv.org/abs/2007.05196) (University of Antwerp, Jul 2020, ICML 2020 LaReL Workshop)
-- [Temporal Abstraction with Interest Functions](https://arxiv.org/abs/2001.00271) (Mila, Feb 2020, AAAI 2020)
-- [Addressing Sample Complexity in Visual Tasks Using Hindsight Experience Replay and Hallucinatory GANs](https://openreview.net/forum?id=H1xSXdV0i4) (Offworld Inc, Georgia Tech, UC Berkeley, ICML 2019 Workshop RL4RealLife)
-- [Avoidance Learning Using Observational Reinforcement Learning](https://arxiv.org/abs/1909.11228) (Mila, McGill, Sept 2019)
-- [Visual Hindsight Experience Replay](https://arxiv.org/pdf/1901.11529.pdf) (Georgia Tech, UC Berkeley, Jan 2019)
-
-This simulator was created as part of work done at [Mila](https://mila.quebec/). -->
-
 ## Installation
 
-Requirements:
-- Python 3.7+
-- Gymnasium
-- NumPy
-- Pyglet (OpenGL 3D graphics)
-- GPU for 3D graphics acceleration (optional)
-
-You can install it from `PyPI` using:
+Install from source:
 
 ```console
-python3 -m pip install miniworld
-```
-
-You can also install from source:
-
-```console
-git clone https://github.com/Farama-Foundation/Miniworld.git
+git clone https://github.com/hlillemark/Miniworld.git
 cd Miniworld
-python3 -m pip install -e .
+conda create -n miniworld python=3.10 -y
+conda activate miniworld
+python3 -m pip install -e ".[dataset]"
 ```
 
 If you run into any problems, please take a look at the [troubleshooting guide](docs/content/troubleshooting.md).
 
-## Usage for dynamic blockworld dataset generation
+## 3D Dynamic Blockworld Usage
 
-```console
-python3 -m pip install -e .[dataset]
-```
+This section describes the dataset generation for the 3D Dynamic Blockworld dataset used in the [Flow Equivariant World Models paper](https://flowequivariantworldmodels.github.io). Static, Dynamic, and different agent options can be configured. Example commands are available below: 
 
 To generate one example video of blockworld, you can use the following command
 ```console 
@@ -120,7 +78,7 @@ xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" pytho
   --dataset-root ./out/blockworld_dataset --num-videos 80 --block-size 10 --num-processes 8
 ```
 
-## Usage
+## Original Miniworld Usage
 
 There is a simple UI application which allows you to control the simulation or real robot manually.
 The `manual_control.py` application will launch the Gym environment, display camera images and send actions
