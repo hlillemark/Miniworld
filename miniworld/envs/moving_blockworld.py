@@ -159,7 +159,7 @@ class MovingBlockWorld(PutNext, utils.EzPickle):
 
         # Choose colors for the blocks
         if self.ensure_base_palette and self.num_blocks > 0:
-            base_palette = ["green", "red", "yellow", "blue", "purple", "gray"]
+            base_palette = ["green", "red", "yellow", "blue", "purple", "grey"]
             # Filter base colors to those present in the pool
             base_palette = [c for c in base_palette if c in self.color_pool]
             k = min(self.num_blocks, len(base_palette))

@@ -53,6 +53,26 @@ Headless rendering:
 
 See also:
   scripts.generate_videos  (single rollout + outputs + policy/env knobs)
+  
+
+Generate videos example script for including block info
+IMPORTANT: ONLY 6 blocks, one of each color.
+140 steps only, so only one possible clip per video
+python -m scripts.generate_videos_batch \
+  --env-name MiniWorld-MovingBlockWorld-v0 \
+  --dataset-root /data/hansen/wm-memory/data/blockworld/sunday_v2_block_info_validation_6_blocks_v2 \
+  --num-videos 1024 --block-size 64 --num-processes 32 \
+  -- \
+  --turn-step-deg 90 --forward-step 1.0 --heading-zero \
+  --grid-mode --grid-vel-min -1 --grid-vel-max 1 --no-time-limit \
+  --render-width 128 --render-height 128 --obs-width 128 --obs-height 128 \
+  --steps 140 --output-2d-map --room-size 16 \
+  --block-size-xy 0.7 --block-height 1.5 \
+  --agent-box-allow-overlap --box-allow-overlap --grid-cardinal-only \
+  --policy biased_walk_v2 --forward-prob 0.92 --cam-fov-y 60 \
+  --num-blocks-min 6 --num-blocks-max 6 --ensure-base-palette --store-block-info
+  
+  
 """
 
 
@@ -82,6 +102,11 @@ def main():
     parser.add_argument("--num-processes", type=int, default=4)
     parser.add_argument("--file-digits", type=int, default=4, help="zero-pad width for filenames inside each block")
     parser.add_argument("--python", default=sys.executable, help="python executable to use for subprocesses")
+    parser.add_argument(
+        "--store-block-info",
+        action="store_true",
+        help="also write <out-prefix>_block_info.pt for each rollout (same as scripts.generate_videos --store-block-info)",
+    )
     # Forward the rest of args verbatim to scripts.generate_videos
     parser.add_argument("rest", nargs=argparse.REMAINDER, help="arguments to forward to scripts.generate_videos (must be after --)")
 
@@ -91,6 +116,9 @@ def main():
     fwd = list(args.rest)
     if fwd and fwd[0] == "--":
         fwd = fwd[1:]
+    # If requested, ensure the underlying single-run script gets the flag
+    if args.store_block_info and ("--store-block-info" not in fwd):
+        fwd = fwd + ["--store-block-info"]
 
     ds_root = Path(args.dataset_root)
     ds_root.mkdir(parents=True, exist_ok=True)

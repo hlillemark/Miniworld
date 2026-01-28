@@ -1491,6 +1491,42 @@ def _wrap_angle(a: np.ndarray) -> np.ndarray:
     return (a + np.pi) % (2 * np.pi) - np.pi
 
 
+def _wrap_angle_0_2pi(a: float) -> float:
+    """Wrap an angle in radians to [0, 2π)."""
+    two_pi = 2.0 * math.pi
+    return float(a % two_pi)
+
+
+def _agent_frame_components(agent_dir: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute 2D forward/right unit vectors in the XZ plane for each agent_dir (radians).
+
+    MiniWorld convention:
+      dir_vec = (cos(dir), 0, -sin(dir))  => forward2 = (cos, -sin) in (x,z)
+      right_vec = (sin(dir), 0, cos(dir)) => right2  = (sin, cos)  in (x,z)
+    """
+    c = np.cos(agent_dir)
+    s = np.sin(agent_dir)
+    forward2 = np.stack([c, -s], axis=-1)  # (...,2)
+    right2 = np.stack([s, c], axis=-1)     # (...,2)
+    return forward2, right2
+
+
+def _to_agent_frame(delta_xz: np.ndarray, agent_dir: np.ndarray) -> np.ndarray:
+    """
+    Convert world XZ deltas into the agent-normalized frame where the agent is at (0,0)
+    and facing +X ("east").
+
+    Returns rel_xz (...,2) where:
+      rel_x = "in front of the agent"
+      rel_z = "to the agent's right"
+    """
+    forward2, right2 = _agent_frame_components(agent_dir)
+    rel_x = np.sum(delta_xz * forward2, axis=-1, keepdims=True)
+    rel_z = np.sum(delta_xz * right2, axis=-1, keepdims=True)
+    return np.concatenate([rel_x, rel_z], axis=-1)
+
+
 def run_rollout(
     env: gym.Env,
     steps: int,
@@ -1500,6 +1536,7 @@ def run_rollout(
     policy_kwargs: dict,
     observe_steps: int = 5,
     capture_top: bool = False,
+    store_block_info: bool = False,
 ) -> Tuple[
     np.ndarray,  # rgb
     np.ndarray,  # depth
@@ -1510,6 +1547,7 @@ def run_rollout(
     np.ndarray,  # delta_dir (T,)
     np.ndarray,  # agent_dir (T,)
     Optional[dict],  # top_view_scale (or None)
+    Optional[dict],  # block_info (or None)
 ]:
     obs_list = []
     depth_list = []
@@ -1518,10 +1556,14 @@ def run_rollout(
     actions = []
     agent_pos_list = []
     agent_dir_list = []
+    # Block info capture (full trajectory length T+1, trimmed to T on return)
+    block_pos_list = []
 
     obs, _ = env.reset()
     if align_heading_zero:
         env.unwrapped.agent.dir = 0.0
+    # Always keep heading in [0, 2π)
+    env.unwrapped.agent.dir = _wrap_angle_0_2pi(env.unwrapped.agent.dir)
 
     # Instantiate policy BEFORE first render so it can adjust spawn pose
     if policy_name == "back_and_forth":
@@ -1552,6 +1594,8 @@ def run_rollout(
     else:
         policy = BiasedRandomPolicy(env=env, **policy_kwargs)
 
+    # Policy may have adjusted spawn pose; ensure heading in [0, 2π) before first capture
+    env.unwrapped.agent.dir = _wrap_angle_0_2pi(env.unwrapped.agent.dir)
     rgb = env.render()  # render current obs after any policy-driven pose adjust
 
     # Collect first frame
@@ -1560,7 +1604,26 @@ def run_rollout(
     depth_list.append(depth)
     # Initial agent state
     agent_pos_list.append(env.unwrapped.agent.pos.copy())
-    agent_dir_list.append(float(env.unwrapped.agent.dir))
+    agent_dir_list.append(_wrap_angle_0_2pi(env.unwrapped.agent.dir))
+
+    # Blocks: define a stable ordering within the episode
+    block_info_static = None
+    blocks = None
+    if store_block_info:
+        try:
+            blocks = [e for e in env.unwrapped.entities if isinstance(e, Box)]
+        except Exception:
+            blocks = []
+        block_info_static = {
+            "block_ids": list(range(len(blocks))),
+            "block_colors": [getattr(b, "color", None) for b in blocks],
+            "block_textures": [getattr(b, "tex_name", None) for b in blocks],
+        }
+        if len(blocks) == 0:
+            block_pos_list.append(np.zeros((0, 3), dtype=np.float32))
+        else:
+            block_pos_list.append(np.stack([b.pos.copy() for b in blocks], axis=0).astype(np.float32))
+
     if capture_top:
         # Capture scale once on the first call
         top, scale = env.unwrapped.render_top_view(
@@ -1577,6 +1640,8 @@ def run_rollout(
     for t in range(steps):
         a = act_fn(t)
         obs, reward, term, trunc, info = env.step(a)
+        # MiniWorld accumulates heading; normalize to [0, 2π) for consistency
+        env.unwrapped.agent.dir = _wrap_angle_0_2pi(env.unwrapped.agent.dir)
         rgb = env.render()
         obs_list.append(rgb)
         depth = env.unwrapped.render_depth(env.unwrapped.vis_fb)
@@ -1587,7 +1652,14 @@ def run_rollout(
         actions.append(a)
         # Record agent state after step
         agent_pos_list.append(env.unwrapped.agent.pos.copy())
-        agent_dir_list.append(float(env.unwrapped.agent.dir))
+        agent_dir_list.append(_wrap_angle_0_2pi(env.unwrapped.agent.dir))
+        if store_block_info:
+            if blocks is None:
+                blocks = [e for e in env.unwrapped.entities if isinstance(e, Box)]
+            if len(blocks) == 0:
+                block_pos_list.append(np.zeros((0, 3), dtype=np.float32))
+            else:
+                block_pos_list.append(np.stack([b.pos.copy() for b in blocks], axis=0).astype(np.float32))
 
         if term or trunc:
             break
@@ -1617,7 +1689,41 @@ def run_rollout(
     # Absolute heading per kept frame (length T)
     agent_dir = agent_dir_full[:steps_executed]
 
-    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale
+    block_info = None
+    if store_block_info:
+        # Full length is T+1; we convert into per-kept-frame (T) values
+        if len(block_pos_list) != (steps_executed + 1):
+            # Best-effort: align by truncation/padding
+            block_pos_list = block_pos_list[: steps_executed + 1]
+            while len(block_pos_list) < (steps_executed + 1):
+                block_pos_list.append(block_pos_list[-1].copy() if block_pos_list else np.zeros((0, 3), dtype=np.float32))
+
+        block_pos_full = np.stack(block_pos_list, axis=0).astype(np.float32)  # (T+1,N,3)
+        block_pos = block_pos_full[:steps_executed]  # (T,N,3) aligned to kept frames
+        block_vel_world = (block_pos_full[1: steps_executed + 1] - block_pos_full[:steps_executed]).astype(np.float32)  # (T,N,3)
+
+        # Agent vel in world coords aligned to kept frames (T,3)
+        agent_vel_world = (agent_pos_full[1: steps_executed + 1] - agent_pos_full[:steps_executed]).astype(np.float32)
+
+        # Relative positions: subtract agent position and rotate into agent frame (XZ only)
+        block_delta_xz = block_pos[:, :, (0, 2)] - agent_pos[:, (0, 2)][:, None, :]
+        block_rel_xz = _to_agent_frame(block_delta_xz, agent_dir[:, None])  # (T,N,2)
+
+        # Relative velocities: subtract agent velocity, then rotate into agent frame (XZ only)
+        rel_vel_xz_world = block_vel_world[:, :, (0, 2)] - agent_vel_world[:, (0, 2)][:, None, :]
+        block_rel_vel_xz = _to_agent_frame(rel_vel_xz_world, agent_dir[:, None])  # (T,N,2)
+
+        block_info = {
+            **(block_info_static or {}),
+            "block_pos_world": torch.from_numpy(block_pos),             # (T,N,3)
+            "block_vel_world": torch.from_numpy(block_vel_world),       # (T,N,3)
+            "block_pos_agent": torch.from_numpy(block_rel_xz.astype(np.float32)),      # (T,N,2)
+            "block_vel_agent": torch.from_numpy(block_rel_vel_xz.astype(np.float32)),  # (T,N,2)
+            "agent_pos_world": torch.from_numpy(agent_pos.astype(np.float32)),         # (T,3)
+            "agent_dir": torch.from_numpy(agent_dir.astype(np.float32)),               # (T,)
+        }
+
+    return rgb_arr, depth_arr, actions_arr, top_arr, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info
 
 
 def write_mp4_rgb(out_path: str, frames: np.ndarray, fps: int = 15):
@@ -1682,7 +1788,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         observe_outward_steps=(args.observe_outward_steps if args.observe_outward_steps is not None else (4 * args.observe_steps)),
     )
 
-    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
@@ -1691,6 +1797,7 @@ def _generate_one(idx: int, ns: SimpleNamespace):
         policy_kwargs=policy_kwargs,
         observe_steps=args.observe_steps,
         capture_top=(args.debug_join or args.output_2d_map),
+        store_block_info=getattr(args, "store_block_info", False),
     )
 
     write_mp4_rgb(f"{out_prefix}_rgb.mp4", rgb)
@@ -1718,6 +1825,9 @@ def _generate_one(idx: int, ns: SimpleNamespace):
 
     if args.output_2d_map and top is not None:
         write_mp4_rgb(f"{out_prefix}_map_2d.mp4", top)
+
+    if getattr(args, "store_block_info", False) and block_info is not None:
+        torch.save(block_info, f"{out_prefix}_block_info.pt")
 
     env.close()
     return idx
@@ -1768,6 +1878,12 @@ def main():
     parser.add_argument("--ensure-base-palette", action="store_true", help="ensure at least one of each base colors: green, red, yellow, blue, purple, gray; remainder random")
     parser.add_argument("--debug-join", dest="debug_join", action="store_true", help="save a side-by-side debug video with RGB (left) and top-view map (right)")
     parser.add_argument("--output-2d-map", dest="output_2d_map", action="store_true", help="save the top-view map as a separate MP4 named *_map_2d.mp4")
+    parser.add_argument(
+        "--store-block-info",
+        dest="store_block_info",
+        action="store_true",
+        help="save per-timestep block metadata to <out-prefix>_block_info.pt (positions/velocities in world + agent-normalized frame, plus agent pose)",
+    )
     parser.add_argument("--spawn-wall-buffer", type=float, default=1.0, help="extra buffer from walls when spawning agent and boxes (meters)")
     parser.add_argument("--room-size", type=int, default=12, help="square room side length in meters (e.g., 12)")
     parser.add_argument("--cam-fov-y", type=float, default=None, help="camera vertical field of view in degrees (locks to this value if provided)")
@@ -1836,7 +1952,7 @@ def main():
         observe_outward_steps=(args.observe_outward_steps if getattr(args, "observe_outward_steps", None) is not None else (4 * args.observe_steps)),
     )
 
-    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale = run_rollout(
+    rgb, depth, actions, top, agent_pos, delta_xz, delta_dir, agent_dir, top_view_scale, block_info = run_rollout(
         env,
         args.steps,
         align_heading_zero=args.heading_zero,
@@ -1845,6 +1961,7 @@ def main():
         policy_kwargs=policy_kwargs,
         observe_steps=args.observe_steps,
         capture_top=(args.debug_join or args.output_2d_map),
+        store_block_info=getattr(args, "store_block_info", False),
     )
 
     # Save outputs
@@ -1883,6 +2000,9 @@ def main():
 
     if args.output_2d_map and top is not None:
         write_mp4_rgb(f"{args.out_prefix}_map_2d.mp4", top)
+
+    if getattr(args, "store_block_info", False) and block_info is not None:
+        torch.save(block_info, f"{args.out_prefix}_block_info.pt")
 
     env.close()
 
