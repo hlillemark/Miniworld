@@ -166,13 +166,10 @@ xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" pytho
 To cite this project please use:
 
 ```bibtex
-@misc{lillemark2026flowequivariantworldmodels,
-    title={Flow Equivariant World Models: Memory for Partially Observed Dynamic Environments}, 
-    author={Hansen Jin Lillemark and Benhao Huang and Fangneng Zhan and Yilun Du and Thomas Anderson Keller},
-    year={2026},
-    eprint={2601.01075},
-    archivePrefix={arXiv},
-    primaryClass={cs.LG},
-    url={https://arxiv.org/abs/2601.01075}, 
-  }
+@inproceedings{lillemark2026flowequivariantworldmodels,
+  title={Flow Equivariant World Models: Structured Memory for Dynamic Environments},
+  author={Lillemark, Hansen Jin and Huang, Benhao and Zhan, Fangneng and Du, Yilun and Keller, Thomas Anderson},
+  booktitle={International Conference on Machine Learning (ICML)},
+  year={2026}
+}
 ```
